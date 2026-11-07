@@ -1,6 +1,6 @@
 # Mitra
 
-A modular, local first AI companion. Mitra remembers per project, reasons
+A modular, local first AI companion, inspired by Jarvis. Mitra remembers per project, reasons
 over retrieved evidence, and acts through allowlisted tools with explicit
 approvals and a full audit trail.
 
