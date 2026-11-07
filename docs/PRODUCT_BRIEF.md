@@ -87,3 +87,12 @@ an opt in local feature. The first connectors land: GitHub reads plus
 PR proposals, read only macOS calendar and inbox, and an approval
 gated memory import path for user supplied JSON or text. A desktop
 shell, server side speech input, and MCP stay future work.
+
+## Fifth milestone scope (shipped, desktop scaffold only)
+
+Intelligence with the same guarantees. Reasoning models plan multi
+step tasks with persisted checkpoints and per step approvals. Cross
+project comparison needs explicit consent per query. Third party MCP
+servers plug in behind read or staged trust tiers. Server speech to
+text with pluggable engines graduates the HUD mic. The Tauri desktop
+shell ships as a scaffold awaiting a user side Rust toolchain.

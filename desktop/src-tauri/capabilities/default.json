@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default window access for the Mitra HUD.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

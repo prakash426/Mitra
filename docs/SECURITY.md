@@ -62,6 +62,24 @@ the enforced rules, and the known gaps through milestone four.
     against a configured local Ollama host. Vectors sit in SQLite beside
     the store they index. Embedding failures fall back to keyword recall
     silently, and disabling the feature needs no data migration.
+14. Plan checkpoints. Plans run read only steps directly and pause at
+    the first staged mutation. Resume rechecks the staged proposal:
+    pending repauses without restaging, denied or expired abandons the
+    plan. Plans are project scoped; a plan ID from another project
+    refuses to resume.
+15. Cross project consent. Comparisons across projects always stage a
+    `cross_project` proposal naming the topic and projects. Reads happen
+    only after approval, pull at most five hits per project, and stay
+    cited per project in the reply.
+16. MCP trust tiers. Servers spawn per call over stdio with timeouts and
+    output caps. Trust `read` runs directly; everything else stages a
+    proposal per call. Server commands come from local config only, never
+    from chat or tool output. Unreachable servers skip at startup.
+17. Voice input privacy. `POST /stt` accepts raw audio bytes with a type
+    allowlist and size cap, transcribes locally, deletes the temp file,
+    and audits the call. The stub engine never processes audio content;
+    faster-whisper downloads its model on first use, which is the only
+    network call in the voice path.
 
 ## Approval flow
 
@@ -111,6 +129,10 @@ purge after the retention window.
   limited to the repos Mitra needs.
 * Calendar and Mail access needs the macOS Automation grant on first run;
   denying it fails those tools closed with guidance.
+* The Tauri desktop scaffold is uncompiled and unaudited until it builds
+  on real hardware with a Rust toolchain.
+* MCP `read` trust runs third party code output directly; grant it only
+  to servers you wrote or reviewed.
 
 ## Reporting and handling
 

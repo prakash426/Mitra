@@ -33,13 +33,20 @@ A single transparent loop, deliberately not a multi agent framework:
 6. Compose the reply through the configured model provider.
 
 Each step returns a typed result so tests can assert the full chain.
-Rule based intent parsing ships first; model driven planning is a later,
-carefully gated upgrade.
+Rule based intent parsing handles explicit commands; model driven
+planning is one swappable step for multi step requests on reasoning
+providers, with chat fallback when the model returns no usable plan.
 
 Open answer mode: providers that declare `can_reason` receive open chat
 questions directly with standing instructions and memory context, so real
 models give real answers. The mock provider keeps deterministic drafts.
 Memory and tool flows always stay grounded in cited evidence.
+
+Plans (`src/mitra/planning.py`) run read only steps at once and pause at
+the first staged mutation for approval. Checkpoints persist in SQLite,
+so `continue plan-N` resumes after restarts. Denied or expired proposals
+abandon the plan instead of skipping the step. Plans never cross project
+boundaries; cross project comparison is a separate consented flow.
 
 ## B. Model provider abstraction
 
@@ -91,7 +98,8 @@ Rules:
 Files: `src/mitra/tools/`
 
 `Tool` defines name, description, read only flag, and an `invoke` contract.
-`ToolRegistry` holds registration and discovery. Milestone four ships eleven:
+`ToolRegistry` holds registration and discovery. Eleven built in tools ship,
+plus dynamic MCP tools per configured server:
 
 * `read_file`: read only, confined to configured allowed directories.
 * `propose_write_file`: stages a write proposal, never writes directly.
@@ -108,11 +116,14 @@ Files: `src/mitra/tools/`
 * `github_open_pr`: stages a PR proposal, never posts directly.
 * `calendar_next`, `mail_recent`: read only macOS Calendar and Mail
   lookups through generated AppleScript.
+* `mcp__<server>__<tool>`: third party MCP tools, discovered at startup
+  from `[mcp.servers]`. Trust `read` runs directly, trust `staged`
+  stages an approval proposal per call.
 
 Staged proposals persist in SQLite with expiry and random single use
 tokens. Chat and API decide through one shared `decide` path.
 
-Future tools (REST, MCP, calendar and mail writers) plug into the same
+Future tools (REST, calendar and mail writers) plug into the same
 registry and inherit policy plus audit without orchestrator changes.
 
 ## E. Security and permission layer
@@ -139,10 +150,12 @@ Milestone three: terminal chat, FastAPI endpoints, and a JARVIS style
 browser HUD over the same core. Voice output is mandatory and natural:
 the HUD ranks neural voices first with pace and tone controls, and the
 terminal speaks through a native backend with `-v` plus rate control.
-Sending a message interrupts speech. Speech to text stays limited to an
-experimental browser mic button; server side voice input, push to talk,
-and wake word remain future layers that talk to this core through the
-API, never wired into reasoning.
+Sending a message interrupts speech. Speech to text runs on the server
+(`POST /stt`, pluggable engines, stub by default) and the HUD mic
+prefers it, falling back to browser recognition on any failure. Push to
+talk and wake word remain future layers that talk to this core through
+the API, never wired into reasoning. A Tauri desktop scaffold wraps the
+same local API and owns the window only.
 
 ## G. macOS autostart
 

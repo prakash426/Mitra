@@ -616,18 +616,28 @@ function tickClock() {
 function setupMic() {
   const btn = $("#mic");
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
+  const canRecord = !!(
+    navigator.mediaDevices &&
+    navigator.mediaDevices.getUserMedia &&
+    window.MediaRecorder
+  );
+  if (!canRecord && !SR) {
     btn.disabled = true;
     btn.title = "Voice input not supported in this browser";
     return;
   }
-  let rec = null;
-  let recording = false;
-  btn.addEventListener("click", () => {
-    if (recording && rec) {
-      rec.stop();
+
+  function setIdle() {
+    btn.classList.remove("rec");
+    btn.textContent = "MIC";
+  }
+
+  function startBrowserRec() {
+    if (!SR) {
+      addMsg("sys", "Microphone unavailable in this browser.");
       return;
     }
+    let rec = null;
     try {
       rec = new SR();
     } catch (err) {
@@ -637,9 +647,9 @@ function setupMic() {
     rec.lang = "en-US";
     rec.interimResults = true;
     rec.maxAlternatives = 1;
-    recording = true;
     btn.classList.add("rec");
     btn.textContent = "STOP";
+    browserRec = rec;
     rec.onresult = (event) => {
       let interim = "";
       let final = "";
@@ -658,23 +668,98 @@ function setupMic() {
       }
     };
     rec.onend = () => {
-      recording = false;
-      btn.classList.remove("rec");
-      btn.textContent = "MIC";
+      browserRec = null;
+      setIdle();
     };
     rec.onerror = (event) => {
-      recording = false;
-      btn.classList.remove("rec");
-      btn.textContent = "MIC";
+      browserRec = null;
+      setIdle();
       addMsg("sys", "Microphone error: " + (event.error || "unknown"));
     };
     try {
       rec.start();
     } catch (err) {
-      recording = false;
-      btn.classList.remove("rec");
-      btn.textContent = "MIC";
+      browserRec = null;
+      setIdle();
     }
+  }
+
+  async function uploadRecording(blob) {
+    setIdle();
+    if (!blob.size) {
+      return;
+    }
+    addMsg("sys", "Transcribing...");
+    try {
+      const res = await fetch(
+        "/stt?project=" + encodeURIComponent(state.project) + "&suffix=webm",
+        { method: "POST", body: blob }
+      );
+      if (!res.ok) {
+        throw new Error("server " + res.status);
+      }
+      const data = await res.json();
+      inputEl.value = (data.text || "").trim();
+      if (inputEl.value) {
+        send();
+      }
+    } catch (err) {
+      addMsg("sys", "Server transcription failed, trying browser mic.");
+      startBrowserRec();
+    }
+  }
+
+  async function startServerRec() {
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      return false;
+    }
+    const chunks = [];
+    let recorder = null;
+    try {
+      recorder = new MediaRecorder(stream);
+    } catch (err) {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size) {
+        chunks.push(event.data);
+      }
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((track) => track.stop());
+      serverRec = null;
+      uploadRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+    };
+    serverRec = recorder;
+    btn.classList.add("rec");
+    btn.textContent = "STOP";
+    recorder.start();
+    return true;
+  }
+
+  let browserRec = null;
+  let serverRec = null;
+  btn.addEventListener("click", async () => {
+    if (serverRec) {
+      serverRec.stop();
+      return;
+    }
+    if (browserRec) {
+      browserRec.stop();
+      return;
+    }
+    if (canRecord) {
+      const started = await startServerRec();
+      if (!started) {
+        startBrowserRec();
+      }
+      return;
+    }
+    startBrowserRec();
   });
 }
 

@@ -16,6 +16,8 @@ from typing import Any
 VALID_PROVIDERS = ("mock", "ollama", "openai_compat")
 VALID_EMBEDDINGS = ("off", "ollama")
 VALID_SPEECH_BACKENDS = ("silent", "say")
+VALID_STT_ENGINES = ("stub", "faster_whisper")
+VALID_MCP_TRUST = ("read", "staged")
 PROFILE_KEYS = ("provider", "model", "allowed_dirs", "shell_enabled")
 
 
@@ -87,6 +89,25 @@ class SpeechConfig:
 
 
 @dataclass(frozen=True)
+class OrchestratorConfig:
+    planning: bool = True
+
+
+@dataclass(frozen=True)
+class SpeechToTextConfig:
+    engine: str = "stub"
+    model: str = "base"
+    max_mb: int = 10
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    command: str = ""
+    args: tuple[str, ...] = ()
+    trust: str = "staged"
+
+
+@dataclass(frozen=True)
 class MitraConfig:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -95,6 +116,9 @@ class MitraConfig:
     approvals: ApprovalsConfig = field(default_factory=ApprovalsConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
     speech: SpeechConfig = field(default_factory=SpeechConfig)
+    orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    speech_to_text: SpeechToTextConfig = field(default_factory=SpeechToTextConfig)
+    mcp_servers: dict[str, McpServerConfig] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_dir: Path = field(default_factory=Path.cwd)
 
@@ -173,6 +197,38 @@ def _profile_overrides(raw: Any) -> dict[str, dict[str, Any]]:
         if "shell_enabled" in values and not isinstance(values["shell_enabled"], bool):
             raise ConfigError("Profile '%s' shell_enabled must be true or false." % name)
         cleaned[name] = dict(values)
+    return cleaned
+
+
+def _mcp_servers(raw: Any) -> dict[str, McpServerConfig]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("[mcp] must be a settings table.")
+    servers_raw = raw.get("servers", {})
+    if not isinstance(servers_raw, dict):
+        raise ConfigError("[mcp.servers] must map names to settings.")
+    cleaned: dict[str, McpServerConfig] = {}
+    for name, values in servers_raw.items():
+        if not isinstance(values, dict):
+            raise ConfigError("MCP server '%s' must be a settings table." % name)
+        command = values.get("command", "")
+        if not isinstance(command, str) or not command.strip():
+            raise ConfigError("MCP server '%s' needs a command." % name)
+        args = values.get("args", [])
+        if not isinstance(args, list) or not all(
+            isinstance(a, str) for a in args
+        ):
+            raise ConfigError("MCP server '%s' args must be a list." % name)
+        trust = values.get("trust", "staged")
+        if trust not in VALID_MCP_TRUST:
+            raise ConfigError(
+                "MCP server '%s' trust must be one of: %s."
+                % (name, ", ".join(VALID_MCP_TRUST))
+            )
+        cleaned[name] = McpServerConfig(
+            command=command.strip(), args=tuple(args), trust=trust
+        )
     return cleaned
 
 
@@ -350,6 +406,34 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
     if not 50 <= speech_rate <= 500:
         raise ConfigError("speech.rate must sit between 50 and 500.")
 
+    orch_raw = raw.get("orchestrator", {})
+    if not isinstance(orch_raw, dict):
+        raise ConfigError("[orchestrator] must be a settings table.")
+    planning = orch_raw.get("planning", True)
+    if not isinstance(planning, bool):
+        raise ConfigError("orchestrator.planning must be true or false.")
+
+    stt_raw = raw.get("speech_to_text", {})
+    if not isinstance(stt_raw, dict):
+        raise ConfigError("[speech_to_text] must be a settings table.")
+    stt_engine = stt_raw.get("engine", "stub")
+    if stt_engine not in VALID_STT_ENGINES:
+        raise ConfigError(
+            "Unknown speech_to_text engine '%s'. Use one of: %s."
+            % (stt_engine, ", ".join(VALID_STT_ENGINES))
+        )
+    stt_model = stt_raw.get("model", "base")
+    if not isinstance(stt_model, str) or not stt_model.strip():
+        raise ConfigError("speech_to_text.model must be a non empty string.")
+    try:
+        stt_max = int(stt_raw.get("max_mb", 10))
+    except (TypeError, ValueError):
+        raise ConfigError("speech_to_text.max_mb must be a whole number.")
+    if not 1 <= stt_max <= 100:
+        raise ConfigError("speech_to_text.max_mb must sit between 1 and 100.")
+
+    mcp_servers = _mcp_servers(raw.get("mcp", {}))
+
     return MitraConfig(
         provider=ProviderConfig(
             name=name,
@@ -373,6 +457,11 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
         approvals=ApprovalsConfig(ttl_seconds=ttl, retain_days=retain),
         shell=_shell_config(raw.get("shell")),
         speech=SpeechConfig(backend=speech_backend, voice=voice, rate=speech_rate),
+        orchestrator=OrchestratorConfig(planning=planning),
+        speech_to_text=SpeechToTextConfig(
+            engine=stt_engine, model=stt_model.strip(), max_mb=stt_max
+        ),
+        mcp_servers=mcp_servers,
         profiles=_profile_overrides(raw.get("profiles", {})),
         project_dir=cfg_path.parent,
     )

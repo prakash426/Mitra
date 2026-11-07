@@ -58,6 +58,27 @@ backend = "silent"
 voice = "Samantha"
 rate = 190
 
+[orchestrator]
+# Model driven planning for multi step requests. Needs a reasoning
+# provider; the mock and failed plans fall back to plain chat.
+planning = true
+
+[speech_to_text]
+# One of: stub, faster_whisper. Stub keeps tests deterministic.
+# faster_whisper needs: pip install faster-whisper, plus a model
+# download on first use (tiny, base, small, medium, large).
+engine = "stub"
+model = "base"
+max_mb = 10
+
+# MCP servers over stdio. Each server spawns per call. Trust "read"
+# runs tools directly; trust "staged" (default) stages an approval
+# proposal per call. List tools with: mcp <server> <tool>.
+# [mcp.servers.notes]
+# command = "python3"
+# args = ["/path/to/notes_mcp.py"]
+# trust = "staged"
+
 # Per project profiles. Each section overrides base settings for that project.
 # Supported keys: provider, model, allowed_dirs, shell_enabled.
 [profiles.CancerLens]

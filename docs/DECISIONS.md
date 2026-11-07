@@ -356,10 +356,89 @@ proposal to keep previews reviewable.
 
 Status: accepted for milestone four.
 
+## D24. Model driven planning as one swappable step [RECOMMENDED]
+
+Context: explicit intents cover single actions, but "do X and then Y"
+needs tool sequencing a regex cannot express.
+
+Decision: multi step markers (or a `plan:` prefix) route open chat on
+reasoning providers through a planner prompt that returns validated
+JSON tool calls. Unknown tools, bad args, and oversized plans reject
+the plan and fall back to chat. The mock provider never plans, keeping
+tests deterministic. A config flag disables planning entirely.
+
+Tradeoffs: plan quality depends on the model, and planning adds a model
+call. Validation bounds the damage: the model picks tools, never policy.
+
+Status: accepted for milestone five.
+
+## D25. Persisted plan checkpoints with resume [REQUIRED]
+
+Context: a plan that pauses for approval must survive restarts and must
+never skip a denied step.
+
+Decision: plans live in a SQLite table with per step done flags and
+staged proposal markers. `continue plan-N` rechecks the staged
+proposal: pending repauses without restaging, denied or expired
+abandons, approved resumes. Plans are project scoped like memories.
+
+Tradeoffs: finished read steps stay finished even if the plan later
+abandons; reads are side effect free, so this is safe but worth knowing.
+
+Status: accepted for milestone five.
+
+## D26. Cross project synthesis needs per query consent [REQUIRED]
+
+Context: project isolation is a core promise; any comparison across
+projects breaks it deliberately.
+
+Decision: `compare <topic> across <A> and <B>` stages a `cross_project`
+proposal naming the topic and projects. Approval reads up to five hits
+per project and returns a grounded per project breakdown. No standing
+consent, no cross project planning.
+
+Tradeoffs: repeated comparisons re-ask every time. Consent fatigue is
+possible; silent cross reads are worse.
+
+Status: accepted for milestone five.
+
+## D27. MCP trust tiers over per call processes [REQUIRED]
+
+Context: third party MCP servers are untrusted code with useful tools.
+
+Decision: servers configure a command plus a trust tier. Trust `read`
+runs tools directly for data the user asserts is safe; trust `staged`
+(the default) stages an approval proposal per call. Each call spawns
+the server fresh over stdio JSON-RPC, so no session state lingers.
+Dead servers skip at startup with an audit entry, never a crash.
+
+Tradeoffs: per call spawn is slower than a persistent session, and only
+tools (not resources or prompts) are exposed. Both are future upgrades
+once trust tiers prove out.
+
+Status: accepted for milestone five.
+
+## D28. Server STT with engines plus Tauri scaffold [RECOMMENDED]
+
+Context: browser speech recognition sends audio to the browser vendor
+and varies by machine.
+
+Decision: `POST /stt` takes raw audio bytes (no new dependencies),
+caps size, deletes temp files, and transcribes through a pluggable
+engine: deterministic stub by default, optional local faster-whisper.
+The HUD mic prefers the server and falls back to browser recognition.
+The Tauri shell ships as an uncompiled scaffold: window only, same API.
+
+Tradeoffs: real transcription needs an optional install plus a model
+download. The scaffold cannot be verified without a Rust toolchain, so
+it stays clearly labeled until it compiles on real hardware.
+
+Status: accepted for milestone five.
+
 ## Open questions for the founder
 
 1. Which Ollama model should be the documented default (size vs quality)?
-2. Server side speech input next, or deeper connectors (MCP, calendar writers)?
-3. Tauri shell next, or is the browser HUD enough for now?
+2. (Answered in M5: both shipped. Deeper connectors or saved workflows next?)
+3. (Answered in M5: scaffold ships. Compile and sign the Tauri app next?)
 4. (Answered in M4: yes, `fetch_private_hosts` ships. Which LAN hosts do
    you actually need?)

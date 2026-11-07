@@ -49,6 +49,7 @@ class Proposal:
     details: str
     project: str
     created_at: str
+    status: str = "pending"
 
 
 def _utcnow() -> datetime:
@@ -136,6 +137,7 @@ class ApprovalGate:
             details=row["details"],
             project=row["project"],
             created_at=row["created_at"],
+            status=row["status"] if "status" in row.keys() else "pending",
         )
 
     def stage(self, action: str, target: str, details: str, project: str) -> Proposal:

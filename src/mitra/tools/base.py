@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from ..config import ShellConfig
+from ..config import McpServerConfig, ShellConfig
 from ..security.audit import AuditLog
 from ..security.policy import ApprovalGate, Policy
 
@@ -19,6 +19,7 @@ class ToolContext:
     shell: ShellConfig | None = None
     fetch_allowed_hosts: tuple[str, ...] = ()
     fetch_private_hosts: tuple[str, ...] = ()
+    mcp_servers: dict[str, McpServerConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

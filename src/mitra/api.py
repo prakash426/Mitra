@@ -7,15 +7,17 @@ scope, and shell settings over one shared database.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import ConfigError, MitraConfig, load_config, resolve_profile
 from .orchestrator import Orchestrator, build_orchestrator
 from .providers.base import ProviderError
+from .stt import ALLOWED_SUFFIXES, TranscribeError, build_engine
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -90,6 +92,11 @@ class TaskOut(BaseModel):
     title: str
     state: str
     updated_at: str
+
+
+class SttOut(BaseModel):
+    text: str
+    engine: str = ""
 
 
 class StatusOut(BaseModel):
@@ -244,6 +251,55 @@ def build_app(
             )
             for e in entries
         ]
+
+    @app.post("/stt", response_model=SttOut)
+    async def transcribe(request: Request, project: str = "default", suffix: str = "webm") -> SttOut:
+        active = current_for(project)
+        cleaned = "." + suffix.strip().lower().lstrip(".")
+        if cleaned not in ALLOWED_SUFFIXES:
+            raise HTTPException(status_code=400, detail="Unsupported audio suffix.")
+        body = await request.body()
+        cap = active.config.speech_to_text.max_mb * 1024 * 1024
+        if len(body) > cap:
+            raise HTTPException(status_code=413, detail="Audio is over the size limit.")
+        if not body:
+            raise HTTPException(status_code=400, detail="No audio received.")
+        engine = build_engine(
+            active.config.speech_to_text.engine, active.config.speech_to_text.model
+        )
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=cleaned, delete=False) as handle:
+                handle.write(body)
+                tmp_path = Path(handle.name)
+            try:
+                text = engine.transcribe(tmp_path)
+            except TranscribeError as exc:
+                active.audit.log(
+                    actor="user",
+                    project=project.strip() or "default",
+                    action="speech_to_text",
+                    target=engine.name,
+                    decision="error",
+                    rationale=str(exc),
+                )
+                raise HTTPException(status_code=503, detail=str(exc))
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        active.audit.log(
+            actor="user",
+            project=project.strip() or "default",
+            action="speech_to_text",
+            target=engine.name,
+            decision="allowed",
+            rationale="Server transcription.",
+            result="%d chars" % len(text),
+        )
+        return SttOut(text=text, engine=engine.name)
 
     @app.get("/audit/verify")
     def audit_verify(project: str = "") -> dict:

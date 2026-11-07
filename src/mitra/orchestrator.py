@@ -10,10 +10,19 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import MitraConfig, ShellConfig, default_config
 from .memory.store import VALID_KINDS, MemoryHit, MemoryRecord, MemoryStore
+from .planning import (
+    PlanError,
+    PlanRecord,
+    PlanStep,
+    PlanStore,
+    looks_like_plan,
+    request_plan,
+)
 from .memory.vectors import (
     EmbeddingError,
     OllamaEmbeddingBackend,
@@ -27,8 +36,10 @@ from .providers.mock import MockProvider
 from .security.audit import AuditLog
 from .security.policy import ApprovalGate, Policy
 from .tools.base import ToolContext
+from .mcp import McpError, list_tools as mcp_list_tools
 from .tools.file_tools import execute_approved_write
 from .tools.github_tools import execute_approved_pr
+from .tools.mcp_tools import McpTool, execute_approved_mcp, mcp_tool_name
 from .tools.registry import ToolRegistry, default_registry
 
 RENDER_INSTRUCTIONS = (
@@ -277,6 +288,29 @@ def _parse(message: str) -> _Intent:
             arg3=match.group(3).strip(),
             arg4=match.group(4).strip(),
         )
+    match = re.match(r"(?is)^\s*continue\s+(plan-\d+)\s*$", text)
+    if match:
+        return _Intent(kind="plan_continue", arg=match.group(1).lower())
+    if re.match(r"(?is)^\s*plans\s*$", text):
+        return _Intent(kind="plan_list")
+    match = re.match(r"(?is)^\s*abandon\s+(plan-\d+)\s*$", text)
+    if match:
+        return _Intent(kind="plan_abandon", arg=match.group(1).lower())
+    match = re.match(r"(?is)^\s*compare\s+(.+?)\s+across\s+(.+?)\s*$", text)
+    if match:
+        return _Intent(
+            kind="synthesis",
+            arg=match.group(1).strip(),
+            arg2=match.group(2).strip(),
+        )
+    match = re.match(r"(?is)^\s*mcp\s+(\S+)\s+(\S+)(?:\s+(.+))?\s*$", text)
+    if match:
+        return _Intent(
+            kind="mcp_call",
+            arg=match.group(1).strip(),
+            arg2=match.group(2).strip(),
+            arg3=(match.group(3) or "").strip(),
+        )
     if any(
         marker in lowered
         for marker in (
@@ -342,6 +376,7 @@ class Orchestrator:
         policy: Policy,
         embedding=None,
         vindex=None,
+        planner: PlanStore | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -352,6 +387,7 @@ class Orchestrator:
         self.policy = policy
         self.embedding = embedding
         self.vindex = vindex
+        self.planner = planner
 
     def close(self) -> None:
         self.memory.close()
@@ -359,6 +395,8 @@ class Orchestrator:
         self.gate.close()
         if self.vindex is not None:
             self.vindex.close()
+        if self.planner is not None:
+            self.planner.close()
 
     def handle_message(self, project: str, message: str) -> OrchestratorResponse:
         """Run one orchestration pass over a user message."""
@@ -375,7 +413,16 @@ class Orchestrator:
             shell=self.policy.shell or self.config.shell,
             fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
             fetch_private_hosts=self.config.tools.fetch_private_hosts,
+            mcp_servers=self.config.mcp_servers,
         )
+        if (
+            intent.kind == "chat"
+            and self.planner is not None
+            and self.config.orchestrator.planning
+            and self.provider.can_reason
+            and looks_like_plan(message)
+        ):
+            return self._plan_message(ctx, message)
         handler = {
             "remember": self._remember,
             "correction": self._correction,
@@ -402,6 +449,11 @@ class Orchestrator:
             "approve": self._approve,
             "deny": self._deny,
             "pending": self._pending,
+            "plan_continue": self._plan_continue,
+            "plan_list": self._plan_list,
+            "plan_abandon": self._plan_abandon,
+            "synthesis": self._synthesis_stage,
+            "mcp_call": self._mcp_call,
             "help": self._help,
             "chat": self._chat,
         }.get(intent.kind, self._chat)
@@ -668,6 +720,7 @@ class Orchestrator:
             shell=self.policy.shell or self.config.shell,
             fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
             fetch_private_hosts=self.config.tools.fetch_private_hosts,
+            mcp_servers=self.config.mcp_servers,
         )
         proposal = self.gate.get(proposal_id)
         if proposal is None:
@@ -732,6 +785,21 @@ class Orchestrator:
             return True, "Approved. %s" % result.output, "pr_executed:" + proposal.id
         if proposal.action == "memory_import":
             return self._execute_import(ctx, proposal, token)
+        if proposal.action == "cross_project":
+            return self._execute_synthesis(ctx, proposal, token)
+        if proposal.action == "mcp_call":
+            result = execute_approved_mcp(proposal.id, token, ctx)
+            if not result.ok:
+                return (
+                    False,
+                    "Approved, but the MCP call failed: %s" % result.error,
+                    "mcp_execute:error",
+                )
+            return (
+                True,
+                "Approved and ran MCP %s.\n%s" % (result.target, result.output),
+                "mcp_executed:" + proposal.id,
+            )
         if proposal.action == "write_file":
             result = execute_approved_write(proposal.id, token, ctx)
             if not result.ok:
@@ -1148,9 +1216,16 @@ class Orchestrator:
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
         items = self.gate.pending(ctx.project)
-        if not items:
-            return "No pending proposals for %s." % ctx.project, [], None, []
         lines = ["%s: %s %s" % (p.id, p.action, p.target) for p in items]
+        if self.planner is not None:
+            for plan in self.planner.active(ctx.project):
+                done = sum(1 for s in plan.steps if s.done)
+                lines.append(
+                    "%s: plan %s (%d of %d steps done)"
+                    % (plan.id, plan.goal[:50], done, len(plan.steps))
+                )
+        if not lines:
+            return "No pending proposals for %s." % ctx.project, [], None, []
         return "Pending for %s:\n%s" % (ctx.project, "\n".join(lines)), [], None, []
 
     def _help(
@@ -1184,10 +1259,461 @@ class Orchestrator:
             "github prs <repo> : list pull requests\n"
             "github open pr <repo> from <head> to <base> titled <title>\n"
             "calendar : upcoming events\n"
-            "check mail : recent inbox subjects\n\nTools:\n%s"
+            "check mail : recent inbox subjects\n"
+            "<do X and then Y> : model planned multi step task\n"
+            "continue <plan-id> / abandon <plan-id> : resume or drop a plan\n"
+            "plans : list active plans\n"
+            "compare <topic> across <A> and <B> : consented comparison\n"
+            "mcp <server> <tool> [json] : call an MCP tool\n\nTools:\n%s"
             % (ctx.project, "\n".join(tool_lines))
         )
         return draft, [], None, []
+
+    def _plan_message(self, ctx: ToolContext, message: str) -> OrchestratorResponse:
+        """Planning intercept. Any planning failure falls back to chat."""
+        assert self.planner is not None
+        chat_intent = _Intent(kind="chat", arg=message)
+        try:
+            steps = request_plan(self.provider, message, self.registry.describe())
+        except PlanError as exc:
+            self.audit.log(
+                actor="system",
+                project=ctx.project,
+                action="plan_rejected",
+                target="planner",
+                decision="error",
+                rationale="Falling back to chat: %s" % exc,
+            )
+            draft, actions, approval, evidence = self._chat(ctx, chat_intent)
+            text = self._render(ctx, chat_intent, message, draft, evidence)
+            return OrchestratorResponse(
+                text=text, actions=actions, approval_request=approval, evidence=evidence
+            )
+        plan = self.planner.create(ctx.project, message[:200], steps)
+        self.audit.log(
+            actor="system",
+            project=ctx.project,
+            action="plan_created",
+            target=plan.id,
+            decision="allowed",
+            rationale="%d steps planned." % len(steps),
+        )
+        draft, actions, approval, evidence = self._run_plan_steps(ctx, plan)
+        return self._finish_plan(ctx, message, draft, actions, approval, evidence)
+
+    def _finish_plan(
+        self,
+        ctx: ToolContext,
+        message: str,
+        draft: str,
+        actions: list[str],
+        approval: ApprovalRequest | None,
+        evidence: list[EvidenceItem],
+    ) -> OrchestratorResponse:
+        intent = _Intent(kind="plan")
+        text = self._render(ctx, intent, message, draft, evidence)
+        return OrchestratorResponse(
+            text=text, actions=actions, approval_request=approval, evidence=evidence
+        )
+
+    def _run_plan_steps(
+        self, ctx: ToolContext, plan: PlanRecord
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        """Execute undone steps. Read steps run at once; the first staged
+        mutation pauses the plan for approval."""
+        assert self.planner is not None
+        steps = list(plan.steps)
+        evidence: list[EvidenceItem] = []
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for index, step in enumerate(steps):
+            if step.done:
+                if step.result and not step.result.startswith("staged:"):
+                    evidence.append(
+                        EvidenceItem(
+                            text=step.result[:500],
+                            source="tool:" + step.tool,
+                            updated=now,
+                        )
+                    )
+                continue
+            if step.result.startswith("staged:"):
+                return self._resume_staged(ctx, plan, steps, index, evidence)
+            tool = self.registry.get(step.tool)
+            if tool is None:
+                self.planner.finish(plan.id, "abandoned")
+                draft = "Plan %s stopped: tool '%s' is not available." % (
+                    plan.id,
+                    step.tool,
+                )
+                self.audit.log(
+                    actor="system",
+                    project=ctx.project,
+                    action="plan_abandoned",
+                    target=plan.id,
+                    decision="error",
+                    rationale=draft,
+                )
+                return draft, ["plan_abandoned:" + plan.id], None, evidence
+            result = tool.invoke(step.args, ctx)
+            if not result.ok:
+                self.planner.finish(plan.id, "abandoned")
+                draft = "Plan %s stopped at step %d (%s): %s" % (
+                    plan.id,
+                    index + 1,
+                    step.tool,
+                    result.error,
+                )
+                self.audit.log(
+                    actor="system",
+                    project=ctx.project,
+                    action="plan_abandoned",
+                    target=plan.id,
+                    decision="error",
+                    rationale=draft,
+                )
+                return draft, ["plan_abandoned:" + plan.id], None, evidence
+            if result.proposal_id:
+                steps[index] = PlanStep(
+                    tool=step.tool,
+                    args=step.args,
+                    done=False,
+                    result="staged:" + result.proposal_id,
+                )
+                self.planner.save_steps(plan.id, tuple(steps))
+                self.audit.log(
+                    actor="system",
+                    project=ctx.project,
+                    action="plan_paused",
+                    target=plan.id,
+                    decision="approval_requested",
+                    rationale="Step %d staged %s." % (index + 1, result.proposal_id),
+                )
+                draft = (
+                    "Plan %s paused at step %d: %s needs your approval.\n"
+                    "Proposal %s is staged. Approve it, then say "
+                    "'continue %s'." % (plan.id, index + 1, step.tool, result.proposal_id, plan.id)
+                )
+                approval = ApprovalRequest(
+                    action="plan_step",
+                    target=result.target or step.tool,
+                    proposal_id=result.proposal_id,
+                    preview=(result.output or step.tool)[:300],
+                )
+                return draft, ["plan_paused:" + plan.id], approval, evidence
+            steps[index] = PlanStep(
+                tool=step.tool, args=step.args, done=True, result=result.output[:1000]
+            )
+            evidence.append(
+                EvidenceItem(
+                    text=result.output[:500] or "(no output)",
+                    source="tool:" + step.tool,
+                    updated=now,
+                )
+            )
+            self.audit.log(
+                actor="system",
+                project=ctx.project,
+                action="plan_step",
+                target=plan.id,
+                decision="allowed",
+                rationale="Step %d (%s) ran read only." % (index + 1, step.tool),
+            )
+        self.planner.save_steps(plan.id, tuple(steps))
+        self.planner.finish(plan.id, "done")
+        self.audit.log(
+            actor="system",
+            project=ctx.project,
+            action="plan_done",
+            target=plan.id,
+            decision="allowed",
+            rationale="%d steps finished." % len(steps),
+        )
+        lines = [
+            "%d. %s: %s" % (i + 1, s.tool, (s.result or "(no output)")[:200])
+            for i, s in enumerate(steps)
+        ]
+        draft = "Plan %s finished in %d steps:\n%s" % (plan.id, len(steps), "\n".join(lines))
+        return draft, ["plan_done:" + plan.id], None, evidence
+
+    def _resume_staged(
+        self, ctx: ToolContext, plan: PlanRecord, steps: list[PlanStep], index: int,
+        evidence: list[EvidenceItem],
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        """Recheck a step that paused for approval before continuing."""
+        assert self.planner is not None
+        step = steps[index]
+        proposal_id = step.result[len("staged:"):]
+        proposal = self.gate.get(proposal_id)
+        if proposal is None:
+            self.planner.finish(plan.id, "abandoned")
+            draft = "Plan %s stopped: proposal %s expired or vanished." % (
+                plan.id,
+                proposal_id,
+            )
+            return draft, ["plan_abandoned:" + plan.id], None, evidence
+        if proposal.status == "pending":
+            draft = (
+                "Plan %s is still waiting on proposal %s. Approve it, then "
+                "say 'continue %s'." % (plan.id, proposal_id, plan.id)
+            )
+            approval = ApprovalRequest(
+                action="plan_step",
+                target=proposal.target,
+                proposal_id=proposal_id,
+                preview=proposal.details[:300],
+            )
+            return draft, ["plan_paused:" + plan.id], approval, evidence
+        if proposal.status != "approved":
+            self.planner.finish(plan.id, "abandoned")
+            draft = "Plan %s stopped: proposal %s was %s. Nothing further ran." % (
+                plan.id,
+                proposal_id,
+                proposal.status,
+            )
+            self.audit.log(
+                actor="system",
+                project=ctx.project,
+                action="plan_abandoned",
+                target=plan.id,
+                decision="denied",
+                rationale=draft,
+            )
+            return draft, ["plan_abandoned:" + plan.id], None, evidence
+        steps[index] = PlanStep(tool=step.tool, args=step.args, done=True, result="")
+        self.planner.save_steps(plan.id, tuple(steps))
+        resumed = PlanRecord(
+            id=plan.id,
+            project=plan.project,
+            goal=plan.goal,
+            steps=tuple(steps),
+            status=plan.status,
+            created_at=plan.created_at,
+        )
+        return self._run_plan_steps(ctx, resumed)
+
+    def _plan_continue(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        plan = self.planner.get(intent.arg)
+        if plan is None or plan.status != "active":
+            return "I have no active %s." % intent.arg, [], None, []
+        if plan.project != ctx.project:
+            return (
+                "Plan %s belongs to project %s, not %s."
+                % (plan.id, plan.project, ctx.project),
+                [],
+                None,
+                [],
+            )
+        return self._run_plan_steps(ctx, plan)
+
+    def _plan_list(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        plans = self.planner.active(ctx.project)
+        if not plans:
+            return "No active plans for %s." % ctx.project, [], None, []
+        lines = []
+        for plan in plans:
+            done = sum(1 for s in plan.steps if s.done)
+            lines.append(
+                "%s: %s (%d of %d steps done)"
+                % (plan.id, plan.goal[:60], done, len(plan.steps))
+            )
+        return "Active plans for %s:\n%s" % (ctx.project, "\n".join(lines)), [], None, []
+
+    def _plan_abandon(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        plan = self.planner.get(intent.arg)
+        if plan is None or plan.status != "active":
+            return "I have no active %s." % intent.arg, [], None, []
+        if plan.project != ctx.project:
+            return (
+                "Plan %s belongs to project %s, not %s."
+                % (plan.id, plan.project, ctx.project),
+                [],
+                None,
+                [],
+            )
+        self.planner.finish(plan.id, "abandoned")
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="plan_abandoned",
+            target=plan.id,
+            decision="denied",
+            rationale="User abandoned the plan.",
+        )
+        return "Abandoned %s. Finished steps stay finished." % plan.id, [], None, []
+
+    def _synthesis_stage(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        projects = [
+            part.strip()
+            for part in re.split(r",|\band\b", intent.arg2)
+            if part.strip()
+        ]
+        projects = [p for p in projects if p.lower() not in ("across",)]
+        problems = [
+            p
+            for p in projects
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _.-]*", p)
+        ]
+        if problems or not 2 <= len(projects) <= 4 or len(set(projects)) != len(projects):
+            return (
+                "Name two to four distinct projects, like "
+                "'compare deploy steps across CancerLens and Demo'.",
+                ["synthesis:error"],
+                None,
+                [],
+            )
+        spec = {"topic": intent.arg[:200], "projects": projects}
+        proposal = self.gate.stage(
+            action="cross_project",
+            target=",".join(projects),
+            details=json.dumps(spec),
+            project=ctx.project,
+        )
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="cross_project",
+            target=proposal.target,
+            decision="approval_requested",
+            rationale="Proposal %s staged." % proposal.id,
+            result="consent to read: %s" % proposal.target,
+        )
+        draft = (
+            "Comparing '%s' across %s reads memories outside %s, so I need "
+            "explicit consent. Proposal %s is staged.\nReply 'approve %s' "
+            "to compare, or 'deny %s' to discard."
+            % (
+                spec["topic"],
+                ", ".join(projects),
+                ctx.project,
+                proposal.id,
+                proposal.id,
+                proposal.id,
+            )
+        )
+        approval = ApprovalRequest(
+            action="cross_project",
+            target=proposal.target,
+            proposal_id=proposal.id,
+            preview="compare '%s' across %s" % (spec["topic"], ", ".join(projects)),
+        )
+        return draft, ["synthesis_proposed:%s" % proposal.id], approval, []
+
+    def _execute_synthesis(
+        self, ctx: ToolContext, proposal, token: str
+    ) -> tuple[bool, str, str]:
+        if not self.gate.consume(proposal.id, token):
+            self.audit.log(
+                actor="user",
+                project=ctx.project,
+                action="cross_project",
+                target=proposal.target,
+                decision="denied",
+                rationale="Approval token invalid, already used, or not approved.",
+            )
+            return (
+                False,
+                "Approval missing or already used for '%s'." % proposal.id,
+                "synthesis_execute:error",
+            )
+        try:
+            spec = json.loads(proposal.details)
+            topic = str(spec.get("topic", "")).strip()
+            projects = [str(p) for p in spec.get("projects", [])]
+        except (ValueError, AttributeError):
+            return False, "Comparison data is unreadable.", "synthesis_execute:error"
+        if not topic or not 2 <= len(projects) <= 4:
+            return False, "Comparison data is unreadable.", "synthesis_execute:error"
+        sections = []
+        total = 0
+        for name in projects:
+            hits = self._hybrid(name, topic, limit=5)
+            total += len(hits)
+            if not hits:
+                sections.append("**%s**: nothing saved on this topic." % name)
+                continue
+            lines = [
+                "- %s (source: %s, updated %s)"
+                % (hit.record.text[:200], hit.record.source, hit.record.updated_at)
+                for hit in hits
+            ]
+            sections.append("**%s**:\n%s" % (name, "\n".join(lines)))
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="cross_project",
+            target=proposal.target,
+            decision="allowed",
+            rationale="Proposal %s approved and executed." % proposal.id,
+            result="%d records compared" % total,
+        )
+        draft = "Comparing '%s' (consented %s):\n\n%s" % (
+            topic,
+            proposal.id,
+            "\n\n".join(sections),
+        )
+        return True, draft, "synthesis_executed:" + proposal.id
+
+    def _mcp_call(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get(mcp_tool_name(intent.arg, intent.arg2))
+        if tool is None:
+            return (
+                "I have no MCP tool '%s' on server '%s'." % (intent.arg2, intent.arg),
+                ["mcp:error"],
+                None,
+                [],
+            )
+        if intent.arg3:
+            try:
+                call_args = json.loads(intent.arg3)
+            except ValueError:
+                return (
+                    "MCP arguments must be a JSON object.",
+                    ["mcp:error"],
+                    None,
+                    [],
+                )
+            if not isinstance(call_args, dict):
+                return "MCP arguments must be a JSON object.", ["mcp:error"], None, []
+        else:
+            call_args = {}
+        result = tool.invoke(call_args, ctx)
+        if not result.ok:
+            return "The MCP call failed: %s" % result.error, ["mcp:error"], None, []
+        if result.proposal_id:
+            draft = (
+                "I staged this MCP call for your approval:\n%s\nProposal: %s\n"
+                "Reply 'approve %s' to run, or 'deny %s' to discard."
+                % (
+                    result.target,
+                    result.proposal_id,
+                    result.proposal_id,
+                    result.proposal_id,
+                )
+            )
+            approval = ApprovalRequest(
+                action="mcp_call",
+                target=result.target,
+                proposal_id=result.proposal_id,
+                preview=result.output[:300],
+            )
+            return draft, ["mcp_proposed:%s" % result.proposal_id], approval, []
+        return result.output, ["mcp:ok"], None, []
 
     def _chat(
         self, ctx: ToolContext, intent: _Intent
@@ -1236,12 +1762,15 @@ def build_orchestrator(
             model=cfg.memory.embed_model, base_url=cfg.memory.embed_base_url
         )
         vindex = VectorIndex(db_path)
+    audit_log = audit or AuditLog(db_path)
+    tool_registry = registry or default_registry()
+    _register_mcp_tools(tool_registry, cfg, audit_log)
     return Orchestrator(
         config=cfg,
         provider=provider or build_provider(cfg),
         memory=memory or MemoryStore(db_path),
-        audit=audit or AuditLog(db_path),
-        registry=registry or default_registry(),
+        audit=audit_log,
+        registry=tool_registry,
         gate=gate or ApprovalGate(
             db_path,
             ttl_seconds=cfg.approvals.ttl_seconds,
@@ -1250,7 +1779,32 @@ def build_orchestrator(
         policy=policy or Policy(cfg.resolve_allowed_dirs(), shell=cfg.shell),
         embedding=embedding,
         vindex=vindex,
+        planner=PlanStore(db_path),
     )
+
+
+def _register_mcp_tools(registry: ToolRegistry, cfg: MitraConfig, audit: AuditLog) -> None:
+    """Discover MCP server tools at startup. Failures skip with an audit."""
+    for name, server in cfg.mcp_servers.items():
+        try:
+            tools = mcp_list_tools(server.command, server.args, timeout=10)
+        except McpError as exc:
+            audit.log(
+                actor="system",
+                project="",
+                action="mcp_discover",
+                target=name,
+                decision="error",
+                rationale=str(exc),
+            )
+            continue
+        for entry in tools:
+            try:
+                registry.register(
+                    McpTool(name, entry["name"], entry["description"], server.trust)
+                )
+            except ValueError:
+                continue
 
 
 def build_test_orchestrator(
@@ -1269,4 +1823,5 @@ def build_test_orchestrator(
         policy=Policy([base], shell=shell),
         embedding=embedding,
         vindex=VectorIndex(db_path) if embedding is not None else None,
+        planner=PlanStore(db_path),
     )

@@ -56,14 +56,26 @@ plus a clean security review of shell and fetch.
 Exit criteria: first connectors live with per connector scopes,
 paraphrase recall without weakening approvals or audit.
 
-## M5. Desktop, voice input, intelligence (next, only after trust is proven)
+## M5. Desktop, voice input, intelligence (shipped, desktop scaffold only)
 
-* Lightweight desktop shell (Tauri candidate) over the local API
-* Server side speech to text behind a media service, HUD mic graduates
+* Model driven planning as one swappable orchestrator step, chat fallback
+* Multi step execution with persisted checkpoints and per step approval
+* Cross project synthesis with explicit consent per comparison
 * MCP client for third party tools through the same policy gate
-* Model driven planning as one swappable orchestrator step
-* Multi step workflows with checkpoints and per step approval
-* Cross project synthesis with explicit consent per query
+* Server side speech to text with pluggable engines, HUD mic graduates
+* Tauri desktop shell scaffold, compiling needs user side cargo
 
-Rule: each M5 feature must keep answers grounded in cited evidence and must
-not weaken the approval or audit guarantees.
+Exit criteria: multi step tasks run with approvals intact, first MCP
+server live behind trust tiers, voice input reaches text parity for
+read and recall flows.
+
+Rule kept: every M5 feature stays grounded in cited evidence and never
+weakens the approval or audit guarantees.
+
+## M6. Polish and autonomy (next)
+
+* Compile, sign, and autostart the Tauri desktop app
+* Saved reusable workflows with parameters, same checkpoint rules
+* Push to talk plus wake word on top of server speech to text
+* Richer MCP: resources, prompts, and longer lived sessions
+* Heavier autonomy only behind the same approvals and audit

@@ -123,6 +123,11 @@ at `~/Library/Logs/mitra/server.log`.
 * Read your macOS calendar and inbox (first run asks permission).
 * Import memories from your own JSON or text files, always with approval.
 * Recall by meaning too, with optional local vector search beside keywords.
+* Plan multi step tasks with a reasoning model, pausing for approvals.
+* Resume paused plans after restarts with `continue plan-N`.
+* Compare memories across projects only with your explicit consent.
+* Call third party MCP servers through read or staged trust tiers.
+* Transcribe voice input on the server; the HUD mic prefers it.
 * Resolve per project profiles for provider, scope, and shell settings.
 * Speak replies aloud in the HUD and in the terminal with -v.
 * Log every proposal, decision, and execution.
@@ -141,6 +146,9 @@ Try it:
 > github read octocat/Hello-World README.md
 > what is on my calendar in the next 7 days?
 > check my inbox
+> plan: list the notes directory and then read the README
+> compare deploy steps across CancerLens and Demo
+> mcp notes search {"query": "release"}
 ```
 
 Writes and shell commands stage a proposal and ask for approval.
@@ -158,10 +166,12 @@ Mitra/
     providers/  base  mock  ollama  openai_compat
     memory/  store  vectors
     tools/  base  registry  file_tools  safe_tools  shell_tool
-      github_tools  macos_tools
+      github_tools  macos_tools  mcp_tools
     security/  policy  audit
+    planning  mcp  stt
     web/  HUD served at the root URL
   scripts/macos/  login install plus uninstall
+  desktop/  Tauri shell scaffold
   tests/
 ```
 
@@ -175,12 +185,12 @@ Mitra/
 
 ## Status and limits
 
-Milestone four is done: everything in three (open answers, natural
-voice, autostart, SSRF guards, deny patterns, retention, audit chain)
-plus per flag shell rules, fetch host exceptions, optional local vector
-recall, a GitHub connector, read only calendar and inbox tools, and an
-approval gated memory import path. No desktop shell, server side speech
-input, or MCP client yet. The shell tool stays disabled unless you
+Milestone five is done: everything in four plus model driven planning
+with persisted checkpoints, consented cross project comparison, an MCP
+client behind trust tiers, server speech to text with a graduated HUD
+mic, and a Tauri desktop scaffold. The desktop shell compiles only with
+a user side Rust toolchain, and real transcription needs the optional
+faster-whisper install. The shell tool stays disabled unless you
 enable it with a narrow allowlist. See [Roadmap](docs/ROADMAP.md) for
 what is next and [Security](docs/SECURITY.md) for known gaps.
 
