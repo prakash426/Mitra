@@ -96,3 +96,11 @@ project comparison needs explicit consent per query. Third party MCP
 servers plug in behind read or staged trust tiers. Server speech to
 text with pluggable engines graduates the HUD mic. The Tauri desktop
 shell ships as a scaffold awaiting a user side Rust toolchain.
+
+## Sixth milestone scope (shipped, hardware blocked items deferred)
+
+Polish without new trust holes. Plans save as named workflows with
+parameters and replay through identical gates. MCP sessions persist
+with respawn, and resource reads honor trust tiers. The HUD gains
+hold Space push to talk. Tauri compiling and wake word detection wait
+for real hardware in milestone seven.

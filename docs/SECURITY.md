@@ -133,6 +133,9 @@ purge after the retention window.
   on real hardware with a Rust toolchain.
 * MCP `read` trust runs third party code output directly; grant it only
   to servers you wrote or reviewed.
+* Workflow parameters are plain data substitution, never evaluated.
+  Workflows inherit plan checkpoints and approvals on every run.
+* No wake word listening exists; the mic records only while you hold it.
 
 ## Reporting and handling
 

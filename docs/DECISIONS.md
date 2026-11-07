@@ -435,10 +435,64 @@ it stays clearly labeled until it compiles on real hardware.
 
 Status: accepted for milestone five.
 
+## D29. Workflows saved from plans with parameters [RECOMMENDED]
+
+Context: useful plans deserve replay, but replaying exact steps cannot
+adapt to new inputs.
+
+Decision: `save plan-N as NAME` stores the plan's tool calls with
+runtime state stripped. An optional `with OLD as KEY` clause turns
+literals into `{{KEY}}` placeholders. `run workflow NAME k=v` fills
+parameters (quoting supported) and executes through the same runner,
+so checkpoints and per step approvals apply unchanged. Missing
+parameters fail before anything runs.
+
+Tradeoffs: no workflow editor or branching; linear replay only. Saving
+from a finished plan keeps authoring honest: only steps that actually
+ran can be kept.
+
+Status: accepted for milestone six.
+
+## D30. Persistent MCP sessions plus resources [RECOMMENDED]
+
+Context: per call server spawn is slow for chatty servers, and tools
+alone cannot expose server side documents.
+
+Decision: the orchestrator owns a session pool with one process per
+server, reused across calls and respawned once when it dies mid call.
+`resources/list` and `resources/read` ride the same sessions. Reads
+honor the server trust tier (direct on `read`, staged proposal
+otherwise); listing stays direct metadata. Staged specs gain a `kind`
+field with backward compatible execution of older tool only specs.
+
+Tradeoffs: idle servers hold a process per configured server after
+first use until shutdown. MCP prompts stay out: sampling needs a user
+visible approval design first.
+
+Status: accepted for milestone six.
+
+## D31. Hold to talk now, wake word later [RECOMMENDED]
+
+Context: click to talk works, but hands busy users want push to talk,
+and the roadmap promises wake word.
+
+Decision: hold Space anywhere outside inputs and buttons to record,
+release to transcribe and send, alongside the existing click toggle.
+Guards skip repeats, button focus, and concurrent recordings. Wake word
+stays deferred: honest detection needs an always on engine plus mic
+streaming that cannot be built or verified in this sandbox.
+
+Tradeoffs: Space is also page scroll, so the HUD prevents default only
+while starting a hold outside inputs. Browser only, like the mic.
+
+Status: accepted for milestone six.
+
 ## Open questions for the founder
 
 1. Which Ollama model should be the documented default (size vs quality)?
-2. (Answered in M5: both shipped. Deeper connectors or saved workflows next?)
-3. (Answered in M5: scaffold ships. Compile and sign the Tauri app next?)
+2. (Answered in M6: workflows shipped. MCP prompts next, or autonomy?)
+3. (Still open: compile and sign the Tauri app on your Mac?)
 4. (Answered in M4: yes, `fetch_private_hosts` ships. Which LAN hosts do
    you actually need?)
+5. Wake word: acceptable as an always on HUD tab feature, or only with
+   dedicated hardware?

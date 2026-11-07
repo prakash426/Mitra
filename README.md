@@ -127,7 +127,10 @@ at `~/Library/Logs/mitra/server.log`.
 * Resume paused plans after restarts with `continue plan-N`.
 * Compare memories across projects only with your explicit consent.
 * Call third party MCP servers through read or staged trust tiers.
+* Read MCP resources, with staged trust asking approval first.
+* Save finished plans as reusable workflows with parameters.
 * Transcribe voice input on the server; the HUD mic prefers it.
+* Talk hands busy: click the mic, or hold Space outside the input.
 * Resolve per project profiles for provider, scope, and shell settings.
 * Speak replies aloud in the HUD and in the terminal with -v.
 * Log every proposal, decision, and execution.
@@ -149,6 +152,9 @@ Try it:
 > plan: list the notes directory and then read the README
 > compare deploy steps across CancerLens and Demo
 > mcp notes search {"query": "release"}
+> save plan-1 as brief with README.md as file
+> run workflow brief file=NOTES.md
+> mcp resources notes
 ```
 
 Writes and shell commands stage a proposal and ask for approval.
@@ -185,14 +191,13 @@ Mitra/
 
 ## Status and limits
 
-Milestone five is done: everything in four plus model driven planning
-with persisted checkpoints, consented cross project comparison, an MCP
-client behind trust tiers, server speech to text with a graduated HUD
-mic, and a Tauri desktop scaffold. The desktop shell compiles only with
-a user side Rust toolchain, and real transcription needs the optional
-faster-whisper install. The shell tool stays disabled unless you
-enable it with a narrow allowlist. See [Roadmap](docs/ROADMAP.md) for
-what is next and [Security](docs/SECURITY.md) for known gaps.
+Milestone six is done: everything in five plus saved parameterized
+workflows, persistent MCP sessions with resource reads, and HUD
+push to talk. Still waiting on real hardware: compiling and signing
+the Tauri app, and wake word detection. Real transcription needs the
+optional faster-whisper install. The shell tool stays disabled unless
+you enable it with a narrow allowlist. See [Roadmap](docs/ROADMAP.md)
+for what is next and [Security](docs/SECURITY.md) for known gaps.
 
 Vector recall stays off until you opt in: set `embeddings = "ollama"`
 in config and pull an embedding model (`ollama pull nomic-embed-text`).

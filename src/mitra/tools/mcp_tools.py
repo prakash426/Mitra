@@ -8,8 +8,36 @@ from __future__ import annotations
 
 import json
 
-from ..mcp import McpError, call_tool
+from ..mcp import McpError, call_tool, read_resource, result_text
 from .base import Tool, ToolContext, ToolResult
+
+
+def _call_via_pool_or_spawn(ctx: ToolContext, server: str, tool: str, args: dict) -> str:
+    cfg = ctx.mcp_servers.get(server)
+    if cfg is None:
+        raise McpError("Unknown MCP server '%s'." % server)
+    if ctx.mcp_pool is not None:
+        result = ctx.mcp_pool.call(
+            cfg.command, cfg.args, "tools/call", {"name": tool, "arguments": args}
+        )
+        return result_text(result, tool)
+    return call_tool(cfg.command, cfg.args, tool, args)
+
+
+def read_via_pool_or_spawn(ctx: ToolContext, server: str, uri: str) -> str:
+    cfg = ctx.mcp_servers.get(server)
+    if cfg is None:
+        raise McpError("Unknown MCP server '%s'." % server)
+    if ctx.mcp_pool is not None:
+        result = ctx.mcp_pool.call(cfg.command, cfg.args, "resources/read", {"uri": uri})
+        parts = []
+        contents = result.get("contents", [])
+        if isinstance(contents, list):
+            for block in contents:
+                if isinstance(block, dict) and "text" in block:
+                    parts.append(str(block.get("text", "")))
+        return "\n".join(parts) if parts else "(no text content)"
+    return read_resource(cfg.command, cfg.args, uri)
 
 
 def mcp_tool_name(server: str, tool: str) -> str:
@@ -35,7 +63,7 @@ class McpTool(Tool):
         target = "%s:%s" % (self._server, self._tool_name)
         if self.read_only:
             try:
-                text = call_tool(cfg.command, cfg.args, self._tool_name, args)
+                text = _call_via_pool_or_spawn(ctx, self._server, self._tool_name, args)
             except McpError as exc:
                 return ToolResult(ok=False, error=str(exc), target=target)
             ctx.audit.log(
@@ -48,7 +76,12 @@ class McpTool(Tool):
                 result="%d chars" % len(text),
             )
             return ToolResult(ok=True, output=text, target=target)
-        spec = {"server": self._server, "tool": self._tool_name, "args": args}
+        spec = {
+            "kind": "tool",
+            "server": self._server,
+            "tool": self._tool_name,
+            "args": args,
+        }
         proposal = ctx.gate.stage(
             action="mcp_call",
             target=target,
@@ -92,18 +125,23 @@ def execute_approved_mcp(proposal_id: str, token: str, ctx: ToolContext) -> Tool
         )
     try:
         spec = json.loads(proposal.details)
+        kind = str(spec.get("kind", "tool"))
         server = str(spec["server"])
-        tool = str(spec["tool"])
-        call_args = dict(spec.get("args", {}))
     except (ValueError, KeyError, TypeError, AttributeError):
         return ToolResult(ok=False, error="Proposal details are unreadable.")
-    cfg = ctx.mcp_servers.get(server)
-    if cfg is None:
-        return ToolResult(ok=False, error="Unknown MCP server '%s'." % server)
+    if kind not in ("tool", "resource"):
+        return ToolResult(ok=False, error="Proposal details are unreadable.")
     try:
-        text = call_tool(cfg.command, cfg.args, tool, call_args)
+        if kind == "resource":
+            text = read_via_pool_or_spawn(ctx, server, str(spec.get("uri", "")))
+        else:
+            text = _call_via_pool_or_spawn(
+                ctx, server, str(spec["tool"]), dict(spec.get("args", {}))
+            )
     except McpError as exc:
         return ToolResult(ok=False, error=str(exc), target=proposal.target)
+    except (KeyError, TypeError, AttributeError):
+        return ToolResult(ok=False, error="Proposal details are unreadable.")
     ctx.audit.log(
         actor="user",
         project=ctx.project,

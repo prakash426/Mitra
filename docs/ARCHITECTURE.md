@@ -47,6 +47,9 @@ the first staged mutation for approval. Checkpoints persist in SQLite,
 so `continue plan-N` resumes after restarts. Denied or expired proposals
 abandon the plan instead of skipping the step. Plans never cross project
 boundaries; cross project comparison is a separate consented flow.
+Finished plans save as named workflows with `{{parameter}}` placeholders
+(`save plan-N as NAME with OLD as KEY`); `run workflow NAME k=v` replays
+them through the same steps, checkpoints, and approvals.
 
 ## B. Model provider abstraction
 
@@ -118,7 +121,10 @@ plus dynamic MCP tools per configured server:
   lookups through generated AppleScript.
 * `mcp__<server>__<tool>`: third party MCP tools, discovered at startup
   from `[mcp.servers]`. Trust `read` runs directly, trust `staged`
-  stages an approval proposal per call.
+  stages an approval proposal per call. Calls reuse a persistent session
+  per server with respawn on death; the orchestrator owns the pool and
+  closes it on shutdown. Resource listing and reading ride the same
+  sessions, with reads honoring the server trust tier.
 
 Staged proposals persist in SQLite with expiry and random single use
 tokens. Chat and API decide through one shared `decide` path.
@@ -153,9 +159,10 @@ terminal speaks through a native backend with `-v` plus rate control.
 Sending a message interrupts speech. Speech to text runs on the server
 (`POST /stt`, pluggable engines, stub by default) and the HUD mic
 prefers it, falling back to browser recognition on any failure. Push to
-talk and wake word remain future layers that talk to this core through
-the API, never wired into reasoning. A Tauri desktop scaffold wraps the
-same local API and owns the window only.
+talk works two ways: click the mic to toggle recording, or hold Space
+outside the input box. Wake word stays future: it needs an always on
+detection engine this sandbox cannot run. A Tauri desktop scaffold wraps
+the same local API and owns the window only.
 
 ## G. macOS autostart
 

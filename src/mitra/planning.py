@@ -115,6 +115,96 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+@dataclass(frozen=True)
+class WorkflowRecord:
+    name: str
+    project: str
+    steps: tuple
+    created_at: str
+
+
+def substitute(args: object, params: dict[str, str]) -> object:
+    """Replace {{key}} placeholders in tool args. Raises KeyError naming
+    the first missing parameter."""
+
+    def fill(text: str) -> str:
+        out = text
+        start = 0
+        while True:
+            begin = out.find("{{", start)
+            if begin < 0:
+                return out
+            end = out.find("}}", begin + 2)
+            if end < 0:
+                return out
+            key = out[begin + 2 : end].strip()
+            if not key:
+                start = end + 2
+                continue
+            if key not in params:
+                raise KeyError(key)
+            out = out[:begin] + params[key] + out[end + 2 :]
+            start = begin + len(params[key])
+
+    if isinstance(args, str):
+        return fill(args)
+    if isinstance(args, list):
+        return [substitute(item, params) for item in args]
+    if isinstance(args, dict):
+        return {key: substitute(value, params) for key, value in args.items()}
+    return args
+
+
+def parametrize(args: object, pairs: list[tuple[str, str]]) -> object:
+    """Replace literal values with {{key}} placeholders for the given
+    (old, key) pairs."""
+
+    def fill(text: str) -> str:
+        out = text
+        for old, key in pairs:
+            if old:
+                out = out.replace(old, "{{%s}}" % key)
+        return out
+
+    if isinstance(args, str):
+        return fill(args)
+    if isinstance(args, list):
+        return [parametrize(item, pairs) for item in args]
+    if isinstance(args, dict):
+        return {key: parametrize(value, pairs) for key, value in args.items()}
+    return args
+
+
+def workflow_params(steps: tuple) -> list[str]:
+    """Parameter names a workflow needs, in first use order."""
+    found: list[str] = []
+
+    def scan(value: object) -> None:
+        if isinstance(value, str):
+            start = 0
+            while True:
+                begin = value.find("{{", start)
+                if begin < 0:
+                    return
+                end = value.find("}}", begin + 2)
+                if end < 0:
+                    return
+                key = value[begin + 2 : end].strip()
+                if key and key not in found:
+                    found.append(key)
+                start = end + 2
+        elif isinstance(value, list):
+            for item in value:
+                scan(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                scan(item)
+
+    for step in steps:
+        scan(step.args)
+    return found
+
+
 class PlanStore:
     """Persisted plan checkpoints beside the approval queue."""
 
@@ -131,6 +221,18 @@ class PlanStore:
                 steps TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                name TEXT NOT NULL,
+                steps TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(project, name)
             )
             """
         )
@@ -238,3 +340,65 @@ class PlanStore:
             "UPDATE plans SET status = ? WHERE id = ?", (status, pk)
         )
         self._conn.commit()
+
+    def save_workflow(
+        self, project: str, name: str, steps: list[PlanStep]
+    ) -> WorkflowRecord:
+        fresh = tuple(
+            PlanStep(tool=s.tool, args=dict(s.args)) for s in steps
+        )
+        self._conn.execute(
+            "INSERT INTO workflows (project, name, steps, created_at)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(project, name) DO UPDATE SET steps = ?, created_at = ?",
+            (
+                project,
+                name,
+                self._steps_to_json(fresh),
+                _utcnow(),
+                self._steps_to_json(fresh),
+                _utcnow(),
+            ),
+        )
+        self._conn.commit()
+        record = self.get_workflow(project, name)
+        if record is None:
+            raise PlanError("could not read back the saved workflow.")
+        return record
+
+    def get_workflow(self, project: str, name: str) -> WorkflowRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM workflows WHERE project = ? AND name = ?",
+            (project, name),
+        ).fetchone()
+        return self._row_to_workflow(row) if row else None
+
+    def list_workflows(self, project: str) -> list[WorkflowRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM workflows WHERE project = ? ORDER BY name", (project,)
+        ).fetchall()
+        return [self._row_to_workflow(row) for row in rows]
+
+    def delete_workflow(self, project: str, name: str) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM workflows WHERE project = ? AND name = ?", (project, name)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def _row_to_workflow(self, row: sqlite3.Row) -> WorkflowRecord:
+        try:
+            raw_steps = json.loads(row["steps"])
+        except ValueError:
+            raw_steps = []
+        steps = tuple(
+            PlanStep(tool=str(s.get("tool", "")), args=dict(s.get("args", {})))
+            for s in raw_steps
+            if isinstance(s, dict)
+        )
+        return WorkflowRecord(
+            name=row["name"],
+            project=row["project"],
+            steps=steps,
+            created_at=row["created_at"],
+        )

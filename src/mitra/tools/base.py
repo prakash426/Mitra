@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from ..config import McpServerConfig, ShellConfig
+from ..mcp import McpPool
 from ..security.audit import AuditLog
 from ..security.policy import ApprovalGate, Policy
 
@@ -20,6 +21,7 @@ class ToolContext:
     fetch_allowed_hosts: tuple[str, ...] = ()
     fetch_private_hosts: tuple[str, ...] = ()
     mcp_servers: dict[str, McpServerConfig] = field(default_factory=dict)
+    mcp_pool: McpPool | None = None
 
 
 @dataclass(frozen=True)

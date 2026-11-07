@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,10 @@ from .planning import (
     PlanStep,
     PlanStore,
     looks_like_plan,
+    parametrize,
     request_plan,
+    substitute,
+    workflow_params,
 )
 from .memory.vectors import (
     EmbeddingError,
@@ -36,10 +40,20 @@ from .providers.mock import MockProvider
 from .security.audit import AuditLog
 from .security.policy import ApprovalGate, Policy
 from .tools.base import ToolContext
-from .mcp import McpError, list_tools as mcp_list_tools
+from .mcp import (
+    McpError,
+    McpPool,
+    list_resources as mcp_list_resources,
+    list_tools as mcp_list_tools,
+)
 from .tools.file_tools import execute_approved_write
 from .tools.github_tools import execute_approved_pr
-from .tools.mcp_tools import McpTool, execute_approved_mcp, mcp_tool_name
+from .tools.mcp_tools import (
+    McpTool,
+    read_via_pool_or_spawn,
+    execute_approved_mcp,
+    mcp_tool_name,
+)
 from .tools.registry import ToolRegistry, default_registry
 
 RENDER_INSTRUCTIONS = (
@@ -222,6 +236,19 @@ def _parse(message: str) -> _Intent:
     if "list memories" in lowered or "important information" in lowered:
         return _Intent(kind="list_memories")
 
+    match = re.match(r"(?is)^\s*save\s+(plan-\d+)\s+as\s+(.+?)\s*$", text)
+    if match:
+        return _Intent(
+            kind="plan_save", arg=match.group(1).lower(), arg2=match.group(2).strip()
+        )
+    match = re.match(r"(?is)^\s*run\s+workflow\s+(.+?)\s*$", text)
+    if match:
+        return _Intent(kind="workflow_run", arg=match.group(1).strip())
+    if re.match(r"(?is)^\s*workflows\s*$", text):
+        return _Intent(kind="workflow_list")
+    match = re.match(r"(?is)^\s*forget\s+workflow\s+(.+?)\s*$", text)
+    if match:
+        return _Intent(kind="workflow_forget", arg=match.group(1).strip())
     match = re.match(r"(?is)^\s*(?:save|write)\s+(.+?)\s+to\s+(\S+)\s*$", text)
     if match:
         content = match.group(1).strip().strip("\"'")
@@ -303,6 +330,16 @@ def _parse(message: str) -> _Intent:
             arg=match.group(1).strip(),
             arg2=match.group(2).strip(),
         )
+    match = re.match(r"(?is)^\s*mcp\s+resources\s+(\S+)\s*$", text)
+    if match:
+        return _Intent(kind="mcp_resources", arg=match.group(1).strip())
+    match = re.match(r"(?is)^\s*mcp\s+resource\s+(\S+)\s+(\S+)\s*$", text)
+    if match:
+        return _Intent(
+            kind="mcp_resource",
+            arg=match.group(1).strip(),
+            arg2=match.group(2).strip(),
+        )
     match = re.match(r"(?is)^\s*mcp\s+(\S+)\s+(\S+)(?:\s+(.+))?\s*$", text)
     if match:
         return _Intent(
@@ -377,6 +414,7 @@ class Orchestrator:
         embedding=None,
         vindex=None,
         planner: PlanStore | None = None,
+        mcp_pool: McpPool | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -388,6 +426,7 @@ class Orchestrator:
         self.embedding = embedding
         self.vindex = vindex
         self.planner = planner
+        self.mcp_pool = mcp_pool or McpPool()
 
     def close(self) -> None:
         self.memory.close()
@@ -397,6 +436,7 @@ class Orchestrator:
             self.vindex.close()
         if self.planner is not None:
             self.planner.close()
+        self.mcp_pool.close()
 
     def handle_message(self, project: str, message: str) -> OrchestratorResponse:
         """Run one orchestration pass over a user message."""
@@ -414,6 +454,7 @@ class Orchestrator:
             fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
             fetch_private_hosts=self.config.tools.fetch_private_hosts,
             mcp_servers=self.config.mcp_servers,
+            mcp_pool=self.mcp_pool,
         )
         if (
             intent.kind == "chat"
@@ -452,8 +493,14 @@ class Orchestrator:
             "plan_continue": self._plan_continue,
             "plan_list": self._plan_list,
             "plan_abandon": self._plan_abandon,
+            "plan_save": self._plan_save,
+            "workflow_run": self._workflow_run,
+            "workflow_list": self._workflow_list,
+            "workflow_forget": self._workflow_forget,
             "synthesis": self._synthesis_stage,
             "mcp_call": self._mcp_call,
+            "mcp_resources": self._mcp_resources,
+            "mcp_resource": self._mcp_resource,
             "help": self._help,
             "chat": self._chat,
         }.get(intent.kind, self._chat)
@@ -721,6 +768,7 @@ class Orchestrator:
             fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
             fetch_private_hosts=self.config.tools.fetch_private_hosts,
             mcp_servers=self.config.mcp_servers,
+            mcp_pool=self.mcp_pool,
         )
         proposal = self.gate.get(proposal_id)
         if proposal is None:
@@ -1264,7 +1312,12 @@ class Orchestrator:
             "continue <plan-id> / abandon <plan-id> : resume or drop a plan\n"
             "plans : list active plans\n"
             "compare <topic> across <A> and <B> : consented comparison\n"
-            "mcp <server> <tool> [json] : call an MCP tool\n\nTools:\n%s"
+            "mcp <server> <tool> [json] : call an MCP tool\n"
+            "mcp resources <server> : list server resources\n"
+            "mcp resource <server> <uri> : read a resource\n"
+            "save <plan-id> as <name> : keep a plan as a workflow\n"
+            "run workflow <name> [k=v] : replay a workflow\n"
+            "workflows : list saved workflows\n\nTools:\n%s"
             % (ctx.project, "\n".join(tool_lines))
         )
         return draft, [], None, []
@@ -1553,6 +1606,184 @@ class Orchestrator:
         )
         return "Abandoned %s. Finished steps stay finished." % plan.id, [], None, []
 
+    @staticmethod
+    def _workflow_name_ok(name: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _.-]*", name))
+
+    @staticmethod
+    def _split_workflow_name(text: str) -> tuple[str, str]:
+        name, sep, clause = text.strip().rpartition(" with ")
+        if sep and " as " in clause:
+            return name.strip(), clause.strip()
+        return text.strip(), ""
+
+    @staticmethod
+    def _parse_param_pairs(clause: str) -> list[tuple[str, str]] | None:
+        pairs: list[tuple[str, str]] = []
+        for part in re.split(r",|\band\b", clause):
+            old, sep, key = part.strip().rpartition(" as ")
+            old, key = old.strip(), key.strip()
+            if not sep or not old or not re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+                return None
+            pairs.append((old, key))
+        return pairs or None
+
+    def _plan_save(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        plan = self.planner.get(intent.arg)
+        if plan is None:
+            return "I have no %s." % intent.arg, [], None, []
+        if plan.project != ctx.project:
+            return (
+                "Plan %s belongs to project %s, not %s."
+                % (plan.id, plan.project, ctx.project),
+                [],
+                None,
+                [],
+            )
+        name, with_clause = self._split_workflow_name(intent.arg2)
+        if not name or not self._workflow_name_ok(name):
+            return (
+                "Workflow names use letters, numbers, spaces, dots, and dashes.",
+                ["workflow:error"],
+                None,
+                [],
+            )
+        steps = list(plan.steps)
+        if with_clause:
+            pairs = self._parse_param_pairs(with_clause)
+            if pairs is None:
+                return (
+                    "Parameters look like: save plan-1 as brief with "
+                    "README.md as file.",
+                    ["workflow:error"],
+                    None,
+                    [],
+                )
+            steps = []
+            for current in plan.steps:
+                filled = parametrize(current.args, pairs)
+                assert isinstance(filled, dict)
+                steps.append(PlanStep(tool=current.tool, args=filled))
+        record = self.planner.save_workflow(ctx.project, name, steps)
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="workflow_save",
+            target=name,
+            decision="allowed",
+            rationale="Saved from %s." % plan.id,
+            result="%d steps" % len(record.steps),
+        )
+        params = workflow_params(record.steps)
+        extra = " Needs parameters: %s." % ", ".join(params) if params else ""
+        draft = "Saved workflow '%s' with %d steps from %s.%s Run it with: run workflow %s" % (
+            name,
+            len(record.steps),
+            plan.id,
+            extra,
+            name,
+        )
+        return draft, ["workflow_saved:" + name], None, []
+
+    def _workflow_run(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        try:
+            tokens = shlex.split(intent.arg)
+        except ValueError:
+            return "I could not parse that workflow command.", ["workflow:error"], None, []
+        params: dict[str, str] = {}
+        name_parts = []
+        for token in tokens:
+            key, eq, value = token.partition("=")
+            if eq and re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+                params[key] = value
+            else:
+                if params:
+                    return (
+                        "Put parameters after the workflow name, like "
+                        "run workflow brief file=README.md.",
+                        ["workflow:error"],
+                        None,
+                        [],
+                    )
+                name_parts.append(token)
+        name = " ".join(name_parts).strip()
+        record = self.planner.get_workflow(ctx.project, name) if name else None
+        if record is None:
+            return "I have no workflow '%s' for %s." % (name, ctx.project), [], None, []
+        steps: list[PlanStep] = []
+        for step in record.steps:
+            try:
+                filled = substitute(step.args, params)
+            except KeyError as missing:
+                return (
+                    "Workflow '%s' needs parameter '%s'. Run with %s=<value>."
+                    % (name, missing.args[0], missing.args[0]),
+                    ["workflow:error"],
+                    None,
+                    [],
+                )
+            if not isinstance(filled, dict):
+                return "Workflow '%s' has unreadable steps." % name, ["workflow:error"], None, []
+            steps.append(PlanStep(tool=step.tool, args=filled))
+        plan = self.planner.create(ctx.project, "workflow %s" % name, steps)
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="workflow_run",
+            target=name,
+            decision="allowed",
+            rationale="Running as %s." % plan.id,
+        )
+        return self._run_plan_steps(ctx, plan)
+
+    def _workflow_list(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        records = self.planner.list_workflows(ctx.project)
+        if not records:
+            return (
+                "No workflows for %s yet. Run a plan, then save it with "
+                "'save plan-N as <name>'." % ctx.project,
+                [],
+                None,
+                [],
+            )
+        lines = []
+        for record in records:
+            params = workflow_params(record.steps)
+            suffix = " (needs: %s)" % ", ".join(params) if params else ""
+            lines.append(
+                "%s: %d steps%s" % (record.name, len(record.steps), suffix)
+            )
+        return "Workflows for %s:\n%s" % (ctx.project, "\n".join(lines)), [], None, []
+
+    def _workflow_forget(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        if self.planner is None:
+            return "Planning is not available here.", [], None, []
+        if self.planner.delete_workflow(ctx.project, intent.arg):
+            self.audit.log(
+                actor="user",
+                project=ctx.project,
+                action="workflow_forget",
+                target=intent.arg,
+                decision="allowed",
+                rationale="User deleted the workflow.",
+            )
+            return "Forgot workflow '%s'." % intent.arg, [], None, []
+        return "I have no workflow '%s' for %s." % (intent.arg, ctx.project), [], None, []
+
     def _synthesis_stage(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
@@ -1715,6 +1946,100 @@ class Orchestrator:
             return draft, ["mcp_proposed:%s" % result.proposal_id], approval, []
         return result.output, ["mcp:ok"], None, []
 
+    def _mcp_resources(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        cfg = ctx.mcp_servers.get(intent.arg)
+        if cfg is None:
+            return (
+                "I have no MCP server '%s'." % intent.arg,
+                ["mcp:error"],
+                None,
+                [],
+            )
+        try:
+            if ctx.mcp_pool is not None:
+                result = ctx.mcp_pool.call(cfg.command, cfg.args, "resources/list", {})
+                items = result.get("resources", [])
+                entries = [
+                    "%s (%s)" % (e.get("uri", "?"), e.get("name", "?"))
+                    for e in items
+                    if isinstance(e, dict)
+                ]
+            else:
+                entries = [
+                    "%s (%s)" % (e["uri"], e["name"])
+                    for e in mcp_list_resources(cfg.command, cfg.args)
+                ]
+        except McpError as exc:
+            return "Listing failed: %s" % exc, ["mcp:error"], None, []
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="mcp_resources",
+            target=intent.arg,
+            decision="allowed",
+            rationale="resource discovery",
+            result="%d resources" % len(entries),
+        )
+        body = "\n".join(entries) if entries else "(no resources)"
+        return "Resources on %s:\n%s" % (intent.arg, body), ["mcp:ok"], None, []
+
+    def _mcp_resource(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        cfg = ctx.mcp_servers.get(intent.arg)
+        if cfg is None:
+            return (
+                "I have no MCP server '%s'." % intent.arg,
+                ["mcp:error"],
+                None,
+                [],
+            )
+        target = "%s:%s" % (intent.arg, intent.arg2)
+        if cfg.trust == "read":
+            try:
+                text = read_via_pool_or_spawn(ctx, intent.arg, intent.arg2)
+            except McpError as exc:
+                return "Reading failed: %s" % exc, ["mcp:error"], None, []
+            self.audit.log(
+                actor="user",
+                project=ctx.project,
+                action="mcp_read",
+                target=target,
+                decision="allowed",
+                rationale="trusted read server",
+                result="%d chars" % len(text),
+            )
+            return text, ["mcp:ok"], None, []
+        spec = {"kind": "resource", "server": intent.arg, "uri": intent.arg2}
+        proposal = ctx.gate.stage(
+            action="mcp_call",
+            target=target,
+            details=json.dumps(spec),
+            project=ctx.project,
+        )
+        ctx.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="mcp_call",
+            target=target,
+            decision="approval_requested",
+            rationale="Proposal %s staged." % proposal.id,
+        )
+        draft = (
+            "I staged this MCP resource read for your approval:\n%s\nProposal: %s\n"
+            "Reply 'approve %s' to run, or 'deny %s' to discard."
+            % (target, proposal.id, proposal.id, proposal.id)
+        )
+        approval = ApprovalRequest(
+            action="mcp_call",
+            target=target,
+            proposal_id=proposal.id,
+            preview="read %s" % target,
+        )
+        return draft, ["mcp_proposed:%s" % proposal.id], approval, []
+
     def _chat(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
@@ -1780,6 +2105,7 @@ def build_orchestrator(
         embedding=embedding,
         vindex=vindex,
         planner=PlanStore(db_path),
+        mcp_pool=McpPool(),
     )
 
 
@@ -1824,4 +2150,5 @@ def build_test_orchestrator(
         embedding=embedding,
         vindex=VectorIndex(db_path) if embedding is not None else None,
         planner=PlanStore(db_path),
+        mcp_pool=McpPool(),
     )

@@ -743,15 +743,9 @@ function setupMic() {
 
   let browserRec = null;
   let serverRec = null;
-  btn.addEventListener("click", async () => {
-    if (serverRec) {
-      serverRec.stop();
-      return;
-    }
-    if (browserRec) {
-      browserRec.stop();
-      return;
-    }
+  let holdTalk = false;
+
+  async function startTalk() {
     if (canRecord) {
       const started = await startServerRec();
       if (!started) {
@@ -760,6 +754,47 @@ function setupMic() {
       return;
     }
     startBrowserRec();
+  }
+
+  function stopTalk() {
+    if (serverRec) {
+      serverRec.stop();
+      return;
+    }
+    if (browserRec) {
+      browserRec.stop();
+    }
+  }
+
+  btn.title = "Click to talk, or hold Space outside the input box";
+  btn.addEventListener("click", async () => {
+    if (serverRec || browserRec) {
+      stopTalk();
+      return;
+    }
+    startTalk();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.code !== "Space" || event.repeat || holdTalk) {
+      return;
+    }
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON") {
+      return;
+    }
+    if (serverRec || browserRec) {
+      return;
+    }
+    event.preventDefault();
+    holdTalk = true;
+    startTalk();
+  });
+  document.addEventListener("keyup", (event) => {
+    if (event.code !== "Space" || !holdTalk) {
+      return;
+    }
+    holdTalk = false;
+    stopTalk();
   });
 }
 

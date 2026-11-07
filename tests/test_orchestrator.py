@@ -7,7 +7,6 @@ import json
 from mitra.orchestrator import (
     OPEN_CHAT_INSTRUCTIONS,
     RENDER_INSTRUCTIONS,
-    Orchestrator,
     build_test_orchestrator,
 )
 from mitra.providers.base import Generation, ModelProvider, ProviderError
