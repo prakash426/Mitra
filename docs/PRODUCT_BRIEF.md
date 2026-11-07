@@ -70,3 +70,20 @@ approvals with expiry, tasks with state, standing instructions, discovery
 tools, a gated shell tool, per project profiles, an adversarial injection
 test pack, and a JARVIS style visual HUD with spoken replies. Full duplex
 voice with wake word, connectors, and a desktop shell remain future work.
+
+## Third milestone scope (shipped)
+
+Real models answer open questions directly with memory context instead
+of sounding like the mock. Voice output turns natural through neural
+system voices with pace and tone controls. Mitra autostarts at macOS
+login and opens the HUD first thing. Fetch and shell harden with SSRF
+guards, deny patterns, proposal retention, and a verifiable audit chain.
+
+## Fourth milestone scope (shipped)
+
+Depth and reach. Shell policy learns per command flag rules and fetch
+learns host exceptions. Vector recall layers beside keyword search as
+an opt in local feature. The first connectors land: GitHub reads plus
+PR proposals, read only macOS calendar and inbox, and an approval
+gated memory import path for user supplied JSON or text. A desktop
+shell, server side speech input, and MCP stay future work.

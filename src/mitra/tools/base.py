@@ -17,6 +17,8 @@ class ToolContext:
     gate: ApprovalGate
     audit: AuditLog
     shell: ShellConfig | None = None
+    fetch_allowed_hosts: tuple[str, ...] = ()
+    fetch_private_hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

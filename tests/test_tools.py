@@ -36,7 +36,7 @@ def test_registry_registers_and_describes():
         registry.register(ReadFileTool())
 
 
-def test_default_registry_has_m2_tools():
+def test_default_registry_has_m4_tools():
     registry = default_registry()
     names = {spec.name for spec in registry.describe()}
     assert names == {
@@ -46,6 +46,11 @@ def test_default_registry_has_m2_tools():
         "search_files",
         "fetch_url",
         "run_shell",
+        "github_read_file",
+        "github_list_prs",
+        "github_open_pr",
+        "calendar_next",
+        "mail_recent",
     }
 
 

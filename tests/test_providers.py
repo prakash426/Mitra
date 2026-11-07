@@ -101,3 +101,9 @@ def test_compat_rejects_bad_key(monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResp({}, status=401))
     with pytest.raises(ProviderError, match="API key"):
         OpenAICompatProvider("m", "http://x", "bad").generate("p")
+
+
+def test_can_reason_flags():
+    assert MockProvider().can_reason is False
+    assert OllamaProvider("m", "http://x").can_reason is True
+    assert OpenAICompatProvider("m", "http://x", "k").can_reason is True

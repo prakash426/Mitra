@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from mitra.config import ShellConfig
 from mitra.security.policy import ApprovalGate, Policy
 
 
@@ -124,3 +125,31 @@ def test_gate_tokens_are_random():
         assert gate.approve(first.id) != gate.approve(second.id)
     finally:
         gate.close()
+
+
+def test_gate_purges_old_decided(tmp_path):
+    gate = ApprovalGate(tmp_path / "gate.db")
+    try:
+        old = gate.stage("write_file", "/a", "x", "P")
+        gate.approve(old.id)
+        gate._conn.execute(
+            "UPDATE proposals SET decided_at = '2001-01-01T00:00:00+00:00' WHERE id = 1"
+        )
+        gate._conn.commit()
+        fresh = gate.stage("write_file", "/b", "y", "P")
+        gate.approve(fresh.id)
+        gate.pending("P")
+        assert gate.get(old.id) is None
+        assert gate.get(fresh.id) is not None
+    finally:
+        gate.close()
+
+
+def test_flag_rules_enforced(tmp_path):
+    shell = ShellConfig(enabled=True, allowlist=("git",), flag_rules={"git": ("status",)})
+    policy = Policy([tmp_path], shell=shell)
+    assert policy.check_shell("git status").needs_approval
+    assert policy.check_shell("git show HEAD").needs_approval
+    denied = policy.check_shell("git status --short")
+    assert not denied.needs_approval and not denied.allowed
+    assert "Flag" in denied.reason

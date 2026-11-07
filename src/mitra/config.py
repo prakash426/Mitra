@@ -7,12 +7,14 @@ Per project profiles override a small safe subset of settings.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 VALID_PROVIDERS = ("mock", "ollama", "openai_compat")
+VALID_EMBEDDINGS = ("off", "ollama")
 VALID_SPEECH_BACKENDS = ("silent", "say")
 PROFILE_KEYS = ("provider", "model", "allowed_dirs", "shell_enabled")
 
@@ -33,11 +35,16 @@ class ProviderConfig:
 @dataclass(frozen=True)
 class MemoryConfig:
     db_path: str = "mitra.db"
+    embeddings: str = "off"
+    embed_model: str = "nomic-embed-text"
+    embed_base_url: str = "http://localhost:11434"
 
 
 @dataclass(frozen=True)
 class ToolsConfig:
     allowed_dirs: tuple[str, ...] = (".",)
+    fetch_allowed_hosts: tuple[str, ...] = ()
+    fetch_private_hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,17 @@ class ApiConfig:
 @dataclass(frozen=True)
 class ApprovalsConfig:
     ttl_seconds: int = 3600
+    retain_days: int = 30
+
+
+DEFAULT_SHELL_DENY_REGEXES = (
+    r"\brm\b[^;|&]*\s-[a-zA-Z]*r",
+    r"\bgit\s+clean\b[^;|&]*\s-[a-zA-Z]*d",
+    r"\bdd\b",
+    r"\bmkfs\b",
+    r"chmod\s+(-R\s+)?777",
+    r":\(\)",
+)
 
 
 @dataclass(frozen=True)
@@ -57,12 +75,15 @@ class ShellConfig:
     allowlist: tuple[str, ...] = ("ls", "pwd", "echo")
     timeout_seconds: int = 30
     max_output_chars: int = 20000
+    deny_regexes: tuple[str, ...] = DEFAULT_SHELL_DENY_REGEXES
+    flag_rules: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class SpeechConfig:
     backend: str = "silent"
     voice: str = "Samantha"
+    rate: int = 190
 
 
 @dataclass(frozen=True)
@@ -173,6 +194,28 @@ def _shell_config(raw: Any) -> ShellConfig:
             raise ConfigError(
                 "shell.allowlist entries must be bare command names."
             )
+    deny = raw.get("deny_regexes", list(DEFAULT_SHELL_DENY_REGEXES))
+    if not isinstance(deny, list):
+        raise ConfigError("shell.deny_regexes must be a list.")
+    for entry in deny:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError("shell.deny_regexes entries must be non empty strings.")
+        try:
+            re.compile(entry)
+        except re.error as exc:
+            raise ConfigError("shell.deny_regexes has a bad pattern: %s." % exc)
+    flag_rules_raw = raw.get("flag_rules", {})
+    if not isinstance(flag_rules_raw, dict):
+        raise ConfigError("shell.flag_rules must map command names to flag lists.")
+    flag_rules: dict[str, tuple[str, ...]] = {}
+    for command, flags in flag_rules_raw.items():
+        if not isinstance(flags, list) or not all(
+            isinstance(f, str) and f.strip() for f in flags
+        ):
+            raise ConfigError(
+                "shell.flag_rules for '%s' must be a list of flags." % command
+            )
+        flag_rules[command] = tuple(flags)
     try:
         timeout = int(raw.get("timeout_seconds", 30))
     except (TypeError, ValueError):
@@ -190,6 +233,8 @@ def _shell_config(raw: Any) -> ShellConfig:
         allowlist=tuple(allowlist),
         timeout_seconds=timeout,
         max_output_chars=max_chars,
+        deny_regexes=tuple(deny),
+        flag_rules=flag_rules,
     )
 
 
@@ -232,6 +277,18 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
     db_path = memory_raw.get("db_path", "mitra.db")
     if not isinstance(db_path, str) or not db_path.strip():
         raise ConfigError("memory.db_path must be a non empty string.")
+    embeddings = memory_raw.get("embeddings", "off")
+    if embeddings not in VALID_EMBEDDINGS:
+        raise ConfigError(
+            "Unknown embeddings '%s'. Use one of: %s."
+            % (embeddings, ", ".join(VALID_EMBEDDINGS))
+        )
+    embed_model = memory_raw.get("embed_model", "nomic-embed-text")
+    if not isinstance(embed_model, str) or not embed_model.strip():
+        raise ConfigError("memory.embed_model must be a non empty string.")
+    embed_base_url = memory_raw.get("embed_base_url", "http://localhost:11434")
+    if not isinstance(embed_base_url, str) or not embed_base_url.strip():
+        raise ConfigError("memory.embed_base_url must be a non empty string.")
 
     allowed = tools_raw.get("allowed_dirs", ["."])
     if not isinstance(allowed, list) or not allowed:
@@ -239,6 +296,22 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
     for entry in allowed:
         if not isinstance(entry, str) or not entry.strip():
             raise ConfigError("tools.allowed_dirs entries must be non empty strings.")
+    hosts = tools_raw.get("fetch_allowed_hosts", [])
+    if not isinstance(hosts, list):
+        raise ConfigError("tools.fetch_allowed_hosts must be a list.")
+    for entry in hosts:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError(
+                "tools.fetch_allowed_hosts entries must be non empty strings."
+            )
+    private_hosts = tools_raw.get("fetch_private_hosts", [])
+    if not isinstance(private_hosts, list):
+        raise ConfigError("tools.fetch_private_hosts must be a list.")
+    for entry in private_hosts:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ConfigError(
+                "tools.fetch_private_hosts entries must be non empty strings."
+            )
 
     host = api_raw.get("host", "127.0.0.1")
     try:
@@ -254,6 +327,12 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
         raise ConfigError("approvals.ttl_seconds must be a whole number.")
     if ttl <= 0:
         raise ConfigError("approvals.ttl_seconds must be positive.")
+    try:
+        retain = int(approvals_raw.get("retain_days", 30))
+    except (TypeError, ValueError):
+        raise ConfigError("approvals.retain_days must be a whole number.")
+    if not 1 <= retain <= 3650:
+        raise ConfigError("approvals.retain_days must sit between 1 and 3650.")
 
     speech_backend = speech_raw.get("backend", "silent")
     if speech_backend not in VALID_SPEECH_BACKENDS:
@@ -264,6 +343,12 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
     voice = speech_raw.get("voice", "Samantha")
     if not isinstance(voice, str) or not voice.strip():
         raise ConfigError("speech.voice must be a non empty string.")
+    try:
+        speech_rate = int(speech_raw.get("rate", 190))
+    except (TypeError, ValueError):
+        raise ConfigError("speech.rate must be a whole number.")
+    if not 50 <= speech_rate <= 500:
+        raise ConfigError("speech.rate must sit between 50 and 500.")
 
     return MitraConfig(
         provider=ProviderConfig(
@@ -273,12 +358,21 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
             timeout_seconds=timeout,
             api_key=api_key,
         ),
-        memory=MemoryConfig(db_path=db_path),
-        tools=ToolsConfig(allowed_dirs=tuple(allowed)),
+        memory=MemoryConfig(
+            db_path=db_path,
+            embeddings=embeddings,
+            embed_model=embed_model,
+            embed_base_url=embed_base_url,
+        ),
+        tools=ToolsConfig(
+            allowed_dirs=tuple(allowed),
+            fetch_allowed_hosts=tuple(h.lower() for h in hosts),
+            fetch_private_hosts=tuple(h.lower() for h in private_hosts),
+        ),
         api=ApiConfig(host=host, port=port),
-        approvals=ApprovalsConfig(ttl_seconds=ttl),
+        approvals=ApprovalsConfig(ttl_seconds=ttl, retain_days=retain),
         shell=_shell_config(raw.get("shell")),
-        speech=SpeechConfig(backend=speech_backend, voice=voice),
+        speech=SpeechConfig(backend=speech_backend, voice=voice, rate=speech_rate),
         profiles=_profile_overrides(raw.get("profiles", {})),
         project_dir=cfg_path.parent,
     )

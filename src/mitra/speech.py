@@ -66,8 +66,9 @@ class MacSayBackend:
 
     name = "say"
 
-    def __init__(self, voice: str = "Samantha") -> None:
+    def __init__(self, voice: str = "Samantha", rate: int = 190) -> None:
         self.voice = voice
+        self.rate = rate
 
     def available(self) -> bool:
         return shutil.which("say") is not None
@@ -79,7 +80,7 @@ class MacSayBackend:
         try:
             for chunk in _chunks(cleaned):
                 subprocess.run(
-                    ["say", "-v", self.voice, chunk],
+                    ["say", "-r", str(self.rate), "-v", self.voice, chunk],
                     timeout=90,
                     check=True,
                     capture_output=True,
@@ -93,5 +94,5 @@ def build_speech(config) -> SpeechBackend:
     """Create the configured speech backend. Unknown names stay silent."""
     section = config.speech
     if section.backend == "say":
-        return MacSayBackend(voice=section.voice)
+        return MacSayBackend(voice=section.voice, rate=section.rate)
     return SilentBackend()

@@ -11,6 +11,7 @@ class OpenAICompatProvider(ModelProvider):
     """Any OpenAI style chat completions endpoint via base URL plus key."""
 
     name = "openai_compat"
+    can_reason = True
 
     def __init__(
         self, model: str, base_url: str, api_key: str, timeout_seconds: int = 30

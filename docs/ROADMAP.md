@@ -28,32 +28,40 @@ green, docs complete, no secrets in repo.
 
 Exit criteria: a week of real daily use with zero unapproved mutations.
 
-## M3. Hardening and reach (next)
+## M3. Answers, voice, autostart, hardening (shipped)
 
-* Server side speech to text behind a media service, HUD mic graduates
-* Interruption handling and barge in for spoken replies
-* Flag level shell policy plus fetch host allowlist and private IP block
-* Proposal retention purge plus audit hash chaining
-* Optional vector recall layered beside FTS5 for paraphrase queries
-* Voice never touches reasoning internals; it calls the stable API
+* Open answer mode: real models answer directly with memory context
+* Natural voice output: neural ranking, pace and tone, speech shaping
+* macOS autostart: login service opens the HUD first thing
+* Fetch SSRF guards: hop revalidation, private block, host allowlist
+* Shell deny patterns over the allowlist
+* Proposal retention purge plus tamper evident audit chain with verify
+* HUD barge in: sending interrupts spoken replies
 
-Exit criteria: full text parity through voice for read and recall flows,
+Exit criteria: real answers on Ollama, natural voice, first at login,
 plus a clean security review of shell and fetch.
 
-## M4. Desktop and connectors
+## M4. Depth and reach (shipped)
+
+* Per flag shell rules plus fetch host exceptions (allow and private)
+* Optional vector recall layered beside FTS5 for paraphrase queries,
+  off by default, lexical fallback always available
+* GitHub connector: read repos, list PRs, propose PRs, approvals stay
+  mandatory
+* Calendar and email: read only macOS tools, each future action approved
+* User controlled memory import: JSON or text file, staged, approved,
+  source tagged
+* Voice never touches reasoning internals; it calls the stable API
+
+Exit criteria: first connectors live with per connector scopes,
+paraphrase recall without weakening approvals or audit.
+
+## M5. Desktop, voice input, intelligence (next, only after trust is proven)
 
 * Lightweight desktop shell (Tauri candidate) over the local API
-* GitHub connector: read repos, propose PRs, approvals stay mandatory
-* Calendar and email: read first, act later, each action approved
+* Server side speech to text behind a media service, HUD mic graduates
 * MCP client for third party tools through the same policy gate
-* User controlled memory import path
-
-Exit criteria: installable app with connector gallery and per connector scopes.
-
-## M5. Intelligence upgrades (only after trust is proven)
-
 * Model driven planning as one swappable orchestrator step
-* Optional vector recall layered beside FTS5
 * Multi step workflows with checkpoints and per step approval
 * Cross project synthesis with explicit consent per query
 

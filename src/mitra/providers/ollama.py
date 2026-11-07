@@ -11,6 +11,7 @@ class OllamaProvider(ModelProvider):
     """Talks to a local Ollama server. No API key needed."""
 
     name = "ollama"
+    can_reason = True
 
     def __init__(self, model: str, base_url: str, timeout_seconds: int = 30) -> None:
         self.model = model

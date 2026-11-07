@@ -92,6 +92,24 @@ def test_shell_stage_and_execute(tmp_path):
         audit.close()
 
 
+def test_shell_deny_patterns(tmp_path):
+    shell = ShellConfig(enabled=True, allowlist=("rm", "git", "echo", "chmod"))
+    gate = ApprovalGate()
+    audit = AuditLog(tmp_path / "a.db")
+    ctx = ToolContext(
+        project="P", policy=Policy([tmp_path], shell=shell), gate=gate, audit=audit,
+        shell=shell,
+    )
+    try:
+        assert not RunShellTool().invoke({"command": "rm -rf old"}, ctx).ok
+        assert not RunShellTool().invoke({"command": "git clean -fdx"}, ctx).ok
+        assert not RunShellTool().invoke({"command": "chmod -R 777 ."}, ctx).ok
+        assert RunShellTool().invoke({"command": "echo fine"}, ctx).ok
+    finally:
+        gate.close()
+        audit.close()
+
+
 def test_shell_missing_binary(tmp_path):
     shell = ShellConfig(enabled=True, allowlist=("no-such-bin-xyz",))
     gate = ApprovalGate()

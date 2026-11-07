@@ -13,10 +13,20 @@ timeout_seconds = 30
 [memory]
 # SQLite path. Relative paths resolve from the project directory.
 db_path = "mitra.db"
+# Optional vector recall. One of: off, ollama. Needs an embedding model:
+# ollama pull nomic-embed-text. Failures fall back to keyword recall.
+embeddings = "off"
+embed_model = "nomic-embed-text"
+embed_base_url = "http://localhost:11434"
 
 [tools]
 # Directories the file tools may touch. Keep this narrow.
 allowed_dirs = ["."]
+# Optional host allowlist for fetch_url. Empty means any public host.
+# Private and local addresses are always blocked.
+fetch_allowed_hosts = []
+# Hosts allowed to resolve private addresses. Use for LAN services only.
+fetch_private_hosts = []
 
 [api]
 host = "127.0.0.1"
@@ -25,6 +35,8 @@ port = 8931
 [approvals]
 # Pending proposals expire after this many seconds.
 ttl_seconds = 3600
+# Decided and expired proposals older than this are purged.
+retain_days = 30
 
 [shell]
 # Disabled by default. Enable only with a narrow allowlist.
@@ -32,11 +44,19 @@ enabled = false
 allowlist = ["ls", "pwd", "echo"]
 timeout_seconds = 30
 max_output_chars = 20000
+# Setting deny_regexes replaces the built in denylist (recursive delete,
+# disk writes, and similar patterns). Leave unset to keep the defaults.
+# Optional per command flag rules. A listed command accepts only these flags.
+# [shell.flag_rules]
+# git = ["status", "log", "--oneline"]
 
 [speech]
 # One of: silent, say (macOS speech for terminal voice output).
+# voice: any installed macOS voice. Premium and Siri voices sound most
+# natural; download them in System Settings, then restart the terminal.
 backend = "silent"
 voice = "Samantha"
+rate = 190
 
 # Per project profiles. Each section overrides base settings for that project.
 # Supported keys: provider, model, allowed_dirs, shell_enabled.

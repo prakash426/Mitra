@@ -199,6 +199,38 @@ input, button, select {
   height: 100%;
   display: block;
 }
+#voicebar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid #0e3a4d;
+  border-radius: 2px;
+  background: #06121c;
+  padding: 6px 10px;
+}
+#voicebar label {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: #4d7f93;
+}
+#voicebar select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 5px 6px;
+}
+#voicebar input[type="range"] {
+  width: 80px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  accent-color: #46e6ff;
+}
+#voicebar button {
+  padding: 5px 12px;
+  font-size: 10px;
+}
 #transcript {
   flex: 1;
   overflow-y: auto;
@@ -279,9 +311,7 @@ input:focus, select:focus {
   padding: 6px 8px;
 }
 #voice-select {
-  max-width: 170px;
   font-size: 11px;
-  padding: 5px 6px;
   color: #7fb3c8;
 }
 button {

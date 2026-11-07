@@ -122,10 +122,12 @@ Status: accepted for milestone one.
 
 * Vector memory: useful for paraphrase recall, but adds a dependency and
   opacity. Revisit when FTS5 demonstrably misses real queries.
+  (Resolved in D20: shipped as an optional local layer in milestone four.)
 * Shell execution tool: the highest risk capability. Ships only with strict
   allowlists, working directory confinement, and per command approval.
+  (Shipped in D12, hardened with flag rules in D19.)
 * Voice pipeline: architecturally separate by design. Starts after the text
-  core is trusted.
+  core is trusted. (Output shipped in D13 and D16; server input stays future.)
 * Multi agent routing: no evidence the single loop is insufficient yet.
 
 ## D10. Persistent approvals with expiry and random tokens [REQUIRED]
@@ -203,9 +205,161 @@ whole team can already run.
 
 Status: accepted for milestone two.
 
+## D15. Open answer mode for reasoning providers [RECOMMENDED]
+
+Context: every reply was an orchestrator draft that the model only
+rephrased, so even capable models sounded basic on open questions.
+
+Decision: providers declare `can_reason`. Open chat with a reasoning
+provider sends the question plus standing instructions and memory context
+straight to the model. Mock keeps deterministic drafts for tests. Memory
+and tool flows stay evidence grounded on all providers, with draft
+fallback when the model errors or returns empty. Both prompt blocks ban
+greetings and stock openers so replies read as continuing conversation,
+never announcements.
+
+Tradeoffs: open answers can reflect model mistakes on general knowledge.
+Mitra never presents them as remembered facts; stored facts always carry
+cited sources.
+
+Status: accepted for milestone three.
+
+## D16. Natural voice through neural system voices [REQUIRED]
+
+Context: the default compact voice sounded robotic.
+
+Decision: rank installed voices toward neural tiers (Siri, Premium,
+Enhanced, neural) and demote compact ones, with pace and tone sliders,
+a test button, persisted choices, and speech shaped text (links spoken
+as "link", pauses at breaks, markup stripped). Terminal speech gains a
+rate setting. No new dependencies, no cloud, no keys.
+
+Tradeoffs: top quality needs a voice download in System Settings and a
+browser restart. Cloud studio voices would sound better still, at the
+cost of keys, spend, and uploads; they stay a future option.
+
+Status: accepted for milestone three.
+
+## D17. macOS autostart through user LaunchAgents [REQUIRED]
+
+Context: Mitra should greet the user first thing after login.
+
+Decision: a server agent with KeepAlive plus a one shot opener agent
+that waits for health and opens the HUD URL. Install and removal are one
+script each, everything runs as the user with user permissions, logs go
+to the standard log folder. Sleep is covered by persistence, not hooks.
+
+Tradeoffs: the HUD opens in the default browser rather than a dedicated
+window. A Tauri shell would own its window; that waits for demand.
+
+Status: accepted for milestone three.
+
+## D18. M3 hardening set [REQUIRED]
+
+Context: fetch and shell are the two tools that reach outside the box.
+
+Decision: fetch validates every redirect hop, blocks private and local
+addresses always, and supports an optional host allowlist. Shell adds a
+configurable deny pattern screen over the allowlist. Decided proposals
+purge after a retention window, and the audit trail gains hash chaining
+with a verify endpoint.
+
+Tradeoffs: private address blocking also blocks fetching your own LAN
+services through Mitra. That is intentional; allowlist your hosts if you
+need them, once the private block learns exceptions.
+
+Status: accepted for milestone three.
+
+## D19. Per command flag rules plus fetch host exceptions [REQUIRED]
+
+Context: D12 left flags to human review, and D18 blocked LAN fetches
+entirely.
+
+Decision: `[shell.flag_rules]` maps a command to its accepted flags;
+anything unlisted is rejected before staging. Fetch gains
+`fetch_allowed_hosts` plus `fetch_private_hosts`, so named LAN hosts
+work while the private block stays default deny. Both ship with tests
+locking the deny first behavior.
+
+Tradeoffs: flag rules are configured per command, so unlisted commands
+still lean on the argv preview at approval time. Host exceptions are a
+small hole the user drills on purpose; every exception stays visible in
+config and every fetch stays audited.
+
+Status: accepted for milestone four.
+
+## D20. Optional local vector recall beside FTS5 [RECOMMENDED]
+
+Context: keyword search misses paraphrase queries ("how do we deploy?"
+vs a note saying "release process").
+
+Decision: an opt in embeddings mode (`embeddings = "ollama"`) embeds
+memories through a local Ollama model, stores vectors in SQLite, and
+merges cosine hits with FTS5 results. Default stays off. Any embedding
+failure falls back to keywords silently, so recall never depends on the
+vector path.
+
+Tradeoffs: recall quality now depends partly on a model outside the
+repo, and vectors add storage per record. Keeping FTS5 primary bounds
+both risks: vectors can only add candidates, never remove keyword hits.
+
+Status: accepted for milestone four.
+
+## D21. GitHub connector with PR proposals [REQUIRED]
+
+Context: the first external connector, touching other people's repos.
+
+Decision: repo reads and PR lists run read only with no token for
+public repos. Private access and PR posts use `MITRA_GITHUB_TOKEN`
+from the environment only, and the token never touches proposals,
+logs, or stored details. Opening a PR always stages an approval
+proposal with repo, branches, and title in the preview.
+
+Tradeoffs: no push, merge, or issue writes yet; each new write needs
+its own proposal shape. API rate limits and outages surface as plain
+tool errors.
+
+Status: accepted for milestone four.
+
+## D22. Read only macOS Calendar and Mail tools [REQUIRED]
+
+Context: schedule and inbox reads are daily companion bread and butter,
+but Calendar and Mail hold sensitive personal data.
+
+Decision: two read only tools generate fixed AppleScript with no user
+text interpolated except a calendar name and numeric bounds, executed
+through `osascript`. First run consent comes from the macOS Automation
+prompt, not from Mitra. No event creation, no mail sending, no deletions;
+any writer later must stage proposals like every other mutation.
+
+Tradeoffs: AppleScript output parsing is stringly typed, and macOS can
+revoke Automation grants at any time. Both failure modes return guidance
+instead of crashing.
+
+Status: accepted for milestone four.
+
+## D23. Approval gated memory import [REQUIRED]
+
+Context: the brief demands a user controlled import mechanism and
+forbids silent access to conversation history.
+
+Decision: `import memories from <file>` reads a user named file inside
+the allowed directories, parses Mitra JSON (`{"memories": [...]}` or a
+bare list) or plain text (one note per line), and stages a single
+approval proposal with a record preview. Approval writes the records
+with an `import:` source tag; denial discards everything. Imported text
+is untrusted data under the same boundary as tool output.
+
+Tradeoffs: no ChatGPT export converter yet; users reshape exports into
+the documented JSON first. Large files cap at `MAX_IMPORT_RECORDS` per
+proposal to keep previews reviewable.
+
+Status: accepted for milestone four.
+
 ## Open questions for the founder
 
 1. Which Ollama model should be the documented default (size vs quality)?
-2. Should project detection stay explicit, or infer from the working dir?
-3. Tauri next, or is the browser HUD enough until connectors land?
-4. Which shell commands belong in your personal allowlist?
+2. Server side speech input next, or deeper connectors (MCP, calendar writers)?
+3. Tauri shell next, or is the browser HUD enough for now?
+4. (Answered in M4: yes, `fetch_private_hosts` ships. Which LAN hosts do
+   you actually need?)

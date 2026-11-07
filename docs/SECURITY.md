@@ -1,18 +1,19 @@
 # Mitra Security
 
 Security is architecture here, not a later patch. This file states the model,
-the enforced rules, and the known gaps for milestone one.
+the enforced rules, and the known gaps through milestone four.
 
 ## Trust model
 
 * Trusted: the user, the local config file, explicit approval decisions.
 * Semi trusted: the configured model provider (sees only retrieved evidence,
   never the full store).
-* Untrusted: file contents, tool outputs, retrieved documents, pasted text.
-  Untrusted content is data. It can inform an answer. It can never issue
-  instructions to the orchestrator.
+* Untrusted: file contents, tool outputs, retrieved documents, pasted text,
+  connector content (GitHub files, mail subjects, calendar titles), import
+  files. Untrusted content is data. It can inform an answer. It can never
+  issue instructions to the orchestrator.
 
-## Enforced rules in milestone one
+## Enforced rules
 
 1. Least privilege tools. Each tool declares read only status. New tools
    default to denied until policy explicitly allows them.
@@ -33,12 +34,34 @@ the enforced rules, and the known gaps for milestone one.
    produce clear messages, never stack traces to the chat surface, never
    partial writes.
 8. Gated shell. Disabled by default. When enabled: bare command
-   allowlist, no shell metacharacters, no absolute or parent path
-   arguments, argv execution with no shell interpreter, binary resolved
-   through PATH, working directory pinned, timeout plus output caps, and
-   per command approval. The injection test pack locks this behavior.
-9. Fetch caps. http and https only, 15 second timeout, 200 KB body cap,
-   non text content skipped, every fetch audited.
+   allowlist, optional per command flag rules that reject unlisted flags,
+   no shell metacharacters, no absolute or parent path arguments, a deny
+   pattern screen for destructive shapes, argv execution with no shell
+   interpreter, binary resolved through PATH, working directory pinned,
+   timeout plus output caps, and per command approval. The injection test
+   pack locks this behavior.
+9. Fetch guards. http and https only, 15 second timeout, 200 KB body cap,
+   non text content skipped, every redirect hop revalidated, private and
+   local addresses blocked unless named in `fetch_private_hosts`,
+   optional `fetch_allowed_hosts` allowlist, every fetch audited.
+10. Tamper evident audit. Each entry hashes the previous hash plus its
+    fields. `/audit/verify` recomputes the chain. Older databases migrate
+    and backfill on open.
+11. Connector scope. GitHub reads need no token for public repos; private
+    reads and PR posts need `MITRA_GITHUB_TOKEN` from the environment.
+    The token never touches proposals, logs, or stored details. Opening
+    a PR always stages an approval proposal first. Calendar and Mail
+    tools are read only, run `osascript` with fixed generated scripts
+    only, and rely on the macOS Automation prompt for first run consent.
+12. Import boundary. Memory import reads a user named file inside the
+    allowed directories, parses JSON or plain text, and stages every
+    record as one approval proposal with a preview. Nothing imports
+    before approval. Imported records carry an `import:` source tag and
+    imported text stays untrusted data: it can be recalled, never obeyed.
+13. Local embeddings. Vector recall is off by default and runs only
+    against a configured local Ollama host. Vectors sit in SQLite beside
+    the store they index. Embedding failures fall back to keyword recall
+    silently, and disabling the feature needs no data migration.
 
 ## Approval flow
 
@@ -56,7 +79,8 @@ Pending proposals expire after the configured TTL and vanish from queues.
 
 Each entry: timestamp (UTC), actor (user or system), project, action type,
 target, decision, rationale, and result. Stored in SQLite alongside memory
-but in a separate table with no update or delete API in milestone one.
+but in a separate table with no update or delete API; decided proposals
+purge after the retention window.
 
 ## Web interface notes
 
@@ -68,19 +92,25 @@ but in a separate table with no update or delete API in milestone one.
   degrades to typing otherwise. No audio leaves the machine except through
   the browser's own recognition service when the user presses the mic.
 
+## Autostart notes
+
+* The installer writes two plists to the user's LaunchAgents folder and
+  loads them for the current user only. Nothing runs as root.
+* Review `scripts/macos/install.sh` before running it; removal is the
+  matching uninstall script.
+
 ## Known gaps and limits
 
-* Audit table has no cryptographic chaining yet, so local tampering is
-  detectable only by inspection. Consider hash chaining later.
 * The API binds to localhost by default; binding wider without auth is
   unsupported and undocumented on purpose.
-* Fetch has no private IP block or host allowlist yet. Treat fetched
-  content as untrusted data, which the orchestrator already does.
-* Shell policy is command level, not flag level. Risky flags on allowed
-  commands rely on per command human review until flag filtering lands.
-* Proposals have no retention purge yet; decided rows accumulate slowly.
+* Flag rules cover only commands you list; unlisted commands still rely
+  on per command human review of their full argv preview.
 * No per project encryption at rest yet. OS level disk encryption is the
   current answer.
+* The GitHub token scope is your choice; prefer a fine grained token
+  limited to the repos Mitra needs.
+* Calendar and Mail access needs the macOS Automation grant on first run;
+  denying it fails those tools closed with guidance.
 
 ## Reporting and handling
 

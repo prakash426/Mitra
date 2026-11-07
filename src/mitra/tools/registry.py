@@ -27,8 +27,10 @@ class ToolRegistry:
 
 
 def default_registry() -> ToolRegistry:
-    """Registry with the milestone two tool set."""
+    """Registry with the milestone four tool set."""
     from .file_tools import ProposeWriteFileTool, ReadFileTool
+    from .github_tools import GithubListPrsTool, GithubOpenPrTool, GithubReadFileTool
+    from .macos_tools import CalendarNextTool, MailRecentTool
     from .safe_tools import FetchUrlTool, ListDirTool, SearchFilesTool
     from .shell_tool import RunShellTool
 
@@ -39,4 +41,9 @@ def default_registry() -> ToolRegistry:
     registry.register(SearchFilesTool())
     registry.register(FetchUrlTool())
     registry.register(RunShellTool())
+    registry.register(GithubReadFileTool())
+    registry.register(GithubListPrsTool())
+    registry.register(GithubOpenPrTool())
+    registry.register(CalendarNextTool())
+    registry.register(MailRecentTool())
     return registry

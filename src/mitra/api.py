@@ -245,6 +245,14 @@ def build_app(
             for e in entries
         ]
 
+    @app.get("/audit/verify")
+    def audit_verify(project: str = "") -> dict:
+        active = current_for(project or "default")
+        ok, count_or_id = active.audit.verify_chain()
+        if ok:
+            return {"ok": True, "checked": count_or_id, "bad_id": 0}
+        return {"ok": False, "checked": 0, "bad_id": count_or_id}
+
     @app.get("/status", response_model=StatusOut)
     def status(project: str = "default") -> StatusOut:
         try:

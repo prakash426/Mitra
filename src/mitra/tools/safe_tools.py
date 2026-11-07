@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
+from socket import getaddrinfo
+from urllib.parse import urljoin, urlsplit
+
 import httpx
 
 from .base import Tool, ToolContext, ToolResult
@@ -13,6 +17,8 @@ MAX_LIST_ENTRIES = 200
 MAX_SEARCH_RESULTS = 50
 MAX_FETCH_BYTES = 200_000
 MAX_FETCH_CHARS = 8000
+MAX_REDIRECTS = 3
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 class ListDirTool(Tool):
@@ -131,8 +137,54 @@ class SearchFilesTool(Tool):
         )
 
 
+def host_problem(
+    url: str,
+    allowed_hosts: tuple[str, ...],
+    private_hosts: tuple[str, ...] = (),
+) -> str:
+    """Validate a fetch target. Returns an error message or empty string."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return "URL has an unreadable host."
+    if not host:
+        return "URL has no host."
+    if allowed_hosts and not any(
+        host == entry or host.endswith("." + entry) for entry in allowed_hosts
+    ):
+        return "Host '%s' is not in the fetch allowlist." % host
+    private_ok = any(
+        host == entry or host.endswith("." + entry) for entry in private_hosts
+    )
+    try:
+        infos = getaddrinfo(host, None)
+    except OSError:
+        return "Cannot resolve host '%s'." % host
+    if private_ok:
+        return ""
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return "Host '%s' resolves to a private or local address." % host
+    return ""
+
+
 class FetchUrlTool(Tool):
-    """Fetch a URL over http or https with strict size and time caps."""
+    """Fetch a URL over http or https with strict size and time caps.
+
+    Every hop is revalidated: public hosts only, optional allowlist,
+    manual redirect loop so a redirect can never smuggle a private target.
+    """
 
     name = "fetch_url"
     description = "Fetch a URL as text. Args: {url}."
@@ -142,20 +194,43 @@ class FetchUrlTool(Tool):
         url = str(args.get("url", "")).strip()
         if not url.lower().startswith(("http://", "https://")):
             return ToolResult(ok=False, error="Only http and https URLs are allowed.")
+        current = url
         try:
-            with httpx.stream(
-                "GET", url, timeout=15, follow_redirects=True
-            ) as response:
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "")
-                data = bytearray()
-                for chunk in response.iter_bytes(8192):
-                    room = MAX_FETCH_BYTES - len(data)
-                    if room <= 0:
-                        break
-                    data += chunk[:room]
+            for _hop in range(MAX_REDIRECTS + 1):
+                problem = host_problem(
+                    current, ctx.fetch_allowed_hosts, ctx.fetch_private_hosts
+                )
+                if problem:
+                    return ToolResult(ok=False, error=problem, target=url)
+                with httpx.stream(
+                    "GET", current, timeout=15, follow_redirects=False
+                ) as response:
+                    location = response.headers.get("location", "")
+                    if response.status_code in REDIRECT_STATUSES and location:
+                        current = urljoin(current, location)
+                        if not current.lower().startswith(("http://", "https://")):
+                            return ToolResult(
+                                ok=False,
+                                error="Redirect target is not http(s).",
+                                target=url,
+                            )
+                        continue
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "")
+                    data = bytearray()
+                    for chunk in response.iter_bytes(8192):
+                        room = MAX_FETCH_BYTES - len(data)
+                        if room <= 0:
+                            break
+                        data += chunk[:room]
+                    return self._finish(ctx, url, content_type, bytes(data))
         except httpx.HTTPError as exc:
             return ToolResult(ok=False, error="Fetch failed: %s." % exc, target=url)
+        return ToolResult(ok=False, error="Too many redirects.", target=url)
+
+    def _finish(
+        self, ctx: ToolContext, url: str, content_type: str, data: bytes
+    ) -> ToolResult:
         truncated = len(data) >= MAX_FETCH_BYTES
         lowered_type = content_type.lower()
         text_types = ("text/", "json", "xml", "javascript")
@@ -175,7 +250,7 @@ class FetchUrlTool(Tool):
                 % (url, len(data), content_type or "unknown type"),
                 target=url,
             )
-        text = bytes(data).decode("utf-8", errors="replace")
+        text = data.decode("utf-8", errors="replace")
         if len(text) > MAX_FETCH_CHARS:
             text = text[:MAX_FETCH_CHARS] + "\n... truncated"
         elif truncated:

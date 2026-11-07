@@ -7,6 +7,7 @@ expiry, so pending decisions survive restarts but never linger forever.
 
 from __future__ import annotations
 
+import re
 import secrets
 import shlex
 import sqlite3
@@ -57,9 +58,15 @@ def _utcnow() -> datetime:
 class ApprovalGate:
     """Persistent approval queue. Tokens are random, single use, expiring."""
 
-    def __init__(self, db_path: str | Path = ":memory:", ttl_seconds: int = 3600) -> None:
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        ttl_seconds: int = 3600,
+        retain_days: int = 30,
+    ) -> None:
         self.db_path = str(db_path)
         self.ttl_seconds = ttl_seconds
+        self.retain_days = retain_days
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(
@@ -103,11 +110,21 @@ class ApprovalGate:
             return None
 
     def _sweep_expired(self) -> None:
-        now = _utcnow().isoformat(timespec="seconds")
+        now = _utcnow()
         self._conn.execute(
             "UPDATE proposals SET status = 'expired' WHERE status = 'pending'"
             " AND expires_at <= ?",
-            (now,),
+            (now.isoformat(timespec="seconds"),),
+        )
+        cutoff = (now - timedelta(days=self.retain_days)).isoformat(timespec="seconds")
+        self._conn.execute(
+            "DELETE FROM proposals WHERE status IN ('approved', 'denied')"
+            " AND decided_at != '' AND decided_at <= ?",
+            (cutoff,),
+        )
+        self._conn.execute(
+            "DELETE FROM proposals WHERE status = 'expired' AND expires_at <= ?",
+            (cutoff,),
         )
         self._conn.commit()
 
@@ -308,6 +325,18 @@ class Policy:
             return Decision.deny(
                 "Command '%s' is not in the shell allowlist." % name
             )
+        for pattern in self.shell.deny_regexes:
+            if re.search(pattern, text):
+                return Decision.deny(
+                    "Command matches a denied pattern and is blocked."
+                )
+        flag_rule = self.shell.flag_rules.get(name)
+        if flag_rule is not None:
+            for token in argv[1:]:
+                if token.startswith("-") and token not in flag_rule:
+                    return Decision.deny(
+                        "Flag '%s' is not allowed for '%s'." % (token, name)
+                    )
         for arg in argv[1:]:
             if arg.startswith("/") or arg.startswith("~") or ".." in arg:
                 return Decision.deny(

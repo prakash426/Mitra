@@ -3,31 +3,45 @@
 const $ = (sel) => document.querySelector(sel);
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+function stored(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (err) {
+    return null;
+  }
+}
+
+function store(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (err) {
+    /* storage unavailable */
+  }
+}
+
+function storedFloat(key, fallback) {
+  const raw = stored(key);
+  const num = raw === null ? NaN : parseFloat(raw);
+  if (Number.isNaN(num) || num < 0.5 || num > 2) {
+    return fallback;
+  }
+  return num;
+}
+
 const state = {
-  project: "default",
+  project: stored("mitra-project") || "default",
   voiceOn: true,
   soundOn: true,
   energy: 0.25,
   energyTarget: 0.25,
   pendingSeen: null,
   voices: [],
+  rate: storedFloat("mitra-rate", 0.98),
+  pitch: storedFloat("mitra-pitch", 1.0),
 };
 
-try {
-  const saved = window.localStorage.getItem("mitra-project");
-  if (saved) {
-    state.project = saved;
-  }
-} catch (err) {
-  /* storage unavailable */
-}
-
 function saveProject() {
-  try {
-    window.localStorage.setItem("mitra-project", state.project);
-  } catch (err) {
-    /* storage unavailable */
-  }
+  store("mitra-project", state.project);
 }
 
 let audioCtx = null;
@@ -128,6 +142,37 @@ function typeInto(el, text) {
   }, 12);
 }
 
+function voiceScore(v) {
+  const name = (v.name || "").toLowerCase();
+  const lang = (v.lang || "").toLowerCase();
+  let score = 0;
+  if (name.indexOf("siri") >= 0) {
+    score += 100;
+  }
+  if (name.indexOf("premium") >= 0) {
+    score += 80;
+  }
+  if (name.indexOf("enhanced") >= 0 || name.indexOf("natural") >= 0) {
+    score += 60;
+  }
+  if (name.indexOf("neural") >= 0) {
+    score += 70;
+  }
+  if (name.indexOf("google us english") >= 0) {
+    score += 40;
+  }
+  if (name.indexOf("compact") >= 0) {
+    score -= 40;
+  }
+  if (lang === "en-us" || lang === "en-gb") {
+    score += 10;
+  }
+  if (v.default) {
+    score += 5;
+  }
+  return score;
+}
+
 function loadVoices() {
   if (!("speechSynthesis" in window)) {
     return;
@@ -136,22 +181,31 @@ function loadVoices() {
   if (!all.length) {
     return;
   }
-  state.voices = all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("en"));
-  if (!state.voices.length) {
-    state.voices = all;
-  }
+  const english = all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("en"));
+  state.voices = (english.length ? english : all).slice().sort((a, b) => {
+    return voiceScore(b) - voiceScore(a);
+  });
   const select = $("#voice-select");
+  const current = select.value || stored("mitra-voice") || "";
   select.textContent = "";
   state.voices.forEach((v) => {
     const opt = document.createElement("option");
     opt.value = v.voiceURI;
-    opt.textContent = v.name;
+    opt.textContent = v.name + " (" + v.lang + ")";
     select.appendChild(opt);
   });
-  const prefer = state.voices.find(
-    (v) => v.name.indexOf("Samantha") >= 0 || v.name.indexOf("Google US English") >= 0
-  );
-  select.value = (prefer || state.voices[0]).voiceURI;
+  const kept = state.voices.find((v) => v.voiceURI === current);
+  select.value = (kept || state.voices[0]).voiceURI;
+}
+
+function shapeForSpeech(text) {
+  return text
+    .replace(/https?:\S+/g, "link")
+    .replace(/[`*_#]/g, "")
+    .replace(/\n+/g, ". ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1500);
 }
 
 function stopSpeak() {
@@ -170,8 +224,8 @@ function speak(text) {
     return;
   }
   try {
-    const clean = text.replace(/[`*_#]/g, "").slice(0, 1500);
-    if (!clean.trim()) {
+    const clean = shapeForSpeech(text);
+    if (!clean) {
       return;
     }
     window.speechSynthesis.cancel();
@@ -180,7 +234,8 @@ function speak(text) {
     if (picked) {
       utter.voice = picked;
     }
-    utter.rate = 1.03;
+    utter.rate = state.rate;
+    utter.pitch = state.pitch;
     utter.onstart = () => {
       state.energyTarget = 1.0;
     };
@@ -677,6 +732,26 @@ function setupEvents() {
     state.soundOn = !state.soundOn;
     soundBtn.textContent = state.soundOn ? "SOUND ON" : "SOUND OFF";
     soundBtn.classList.toggle("on", state.soundOn);
+  });
+  const rateEl = $("#rate");
+  const pitchEl = $("#pitch");
+  rateEl.value = String(state.rate);
+  pitchEl.value = String(state.pitch);
+  rateEl.addEventListener("input", () => {
+    state.rate = parseFloat(rateEl.value);
+    store("mitra-rate", rateEl.value);
+  });
+  pitchEl.addEventListener("input", () => {
+    state.pitch = parseFloat(pitchEl.value);
+    store("mitra-pitch", pitchEl.value);
+  });
+  $("#voice-select").addEventListener("change", (event) => {
+    store("mitra-voice", event.target.value);
+  });
+  $("#voice-test").addEventListener("click", () => {
+    stopSpeak();
+    speak("Systems nominal. This is my voice, at your chosen pace and tone.");
+    blip(660, 880, 130);
   });
   window.addEventListener("resize", sizeCanvas);
 }

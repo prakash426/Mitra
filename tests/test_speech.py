@@ -40,7 +40,20 @@ def test_say_backend_argv(monkeypatch):
     backend = MacSayBackend(voice="Samantha")
     assert backend.available() is True
     assert backend.speak("Hello there.") is True
-    assert calls == [["say", "-v", "Samantha", "Hello there."]]
+    assert calls == [["say", "-r", "190", "-v", "Samantha", "Hello there."]]
+
+
+def test_say_backend_custom_rate(monkeypatch):
+    calls = []
+    monkeypatch.setattr("mitra.speech.shutil.which", lambda name: "/usr/bin/say")
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return None
+
+    monkeypatch.setattr("mitra.speech.subprocess.run", fake_run)
+    assert MacSayBackend(voice="Alex", rate=220).speak("Hi.") is True
+    assert calls == [["say", "-r", "220", "-v", "Alex", "Hi."]]
 
 
 def test_say_backend_unavailable(monkeypatch):

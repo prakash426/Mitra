@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from mitra.orchestrator import Orchestrator, build_test_orchestrator
-from mitra.providers.base import ProviderError
+import json
+
+from mitra.orchestrator import (
+    OPEN_CHAT_INSTRUCTIONS,
+    RENDER_INSTRUCTIONS,
+    Orchestrator,
+    build_test_orchestrator,
+)
+from mitra.providers.base import Generation, ModelProvider, ProviderError
 
 
 def test_scenario_a_remember_and_recall(orch):
@@ -224,3 +231,191 @@ def test_decide_shared_path(orch, workdir):
     assert (workdir / "decide.txt").exists()
     ok2, message2, _tag2 = orch.decide("P", pid, False)
     assert not ok2 and "already decided" in message2
+
+
+class ReasoningStub(ModelProvider):
+    name = "stub"
+    can_reason = True
+
+    def __init__(self, reply="Stub answer."):
+        self.reply = reply
+        self.calls = []
+
+    def generate(self, prompt, context=""):
+        self.calls.append((prompt, context))
+        return Generation(text=self.reply, model="stub", provider="stub")
+
+
+def test_open_answer_uses_model_text(tmp_path):
+    orch = build_test_orchestrator(tmp_path)
+    stub = ReasoningStub()
+    orch.provider = stub
+    try:
+        orch.handle_message("P", "standing: Keep answers short.")
+        orch.handle_message("P", "Remember that P uses tabs.")
+        response = orch.handle_message("P", "Why do we use tabs?")
+        assert response.text == "Stub answer."
+        prompt = stub.calls[-1][0]
+        assert "Why do we use tabs?" in prompt
+        assert "Keep answers short." in prompt
+        assert "P uses tabs." in prompt
+    finally:
+        orch.close()
+
+
+def test_open_answer_empty_falls_back_to_draft(tmp_path):
+    orch = build_test_orchestrator(tmp_path)
+    orch.provider = ReasoningStub(reply="   ")
+    try:
+        response = orch.handle_message("P", "hello there")
+        assert "I am Mitra" in response.text
+    finally:
+        orch.close()
+
+
+def test_open_answer_error_stays_graceful(tmp_path):
+    class FailingReasoning(ReasoningStub):
+        def generate(self, prompt, context=""):
+            raise ProviderError("down")
+
+    orch = build_test_orchestrator(tmp_path)
+    orch.provider = FailingReasoning()
+    try:
+        response = orch.handle_message("P", "hello there")
+        assert "could not reach" in response.text
+        assert "I am Mitra" in response.text
+    finally:
+        orch.close()
+
+
+def test_recall_stays_grounded_with_reasoning_provider(tmp_path):
+    orch = build_test_orchestrator(tmp_path)
+    stub = ReasoningStub()
+    orch.provider = stub
+    try:
+        orch.handle_message("P", "Remember that P uses tabs.")
+        orch.handle_message("P", "What did we decide about tabs?")
+        assert "P uses tabs." in stub.calls[-1][0]
+    finally:
+        orch.close()
+
+
+def test_prompts_forbid_greetings_and_preambles():
+    for text in (OPEN_CHAT_INSTRUCTIONS, RENDER_INSTRUCTIONS):
+        lowered = text.lower()
+        assert "greet" in lowered
+        assert "stock" in lowered
+        assert "preamble" in lowered or "announcement" in lowered
+
+
+def test_import_json_flow(orch, workdir):
+    (workdir / "lib.json").write_text(
+        json.dumps([{"kind": "fact", "text": "Imported fact."}, "Plain string note."]),
+        encoding="utf-8",
+    )
+    staged = orch.handle_message("P", "import memories from lib.json")
+    assert staged.approval_request is not None
+    assert staged.approval_request.action == "memory_import"
+    assert orch.memory.list_project("P") == []
+    done = orch.handle_message("P", "approve " + staged.approval_request.proposal_id)
+    assert "imported 2 records" in done.text
+    records = orch.memory.list_project("P")
+    assert len(records) == 2
+    assert all(r.source == "import:lib.json" for r in records)
+
+
+def test_import_text_and_errors(orch, workdir):
+    (workdir / "notes.txt").write_text("- first note\n\n- second note\n", encoding="utf-8")
+    staged = orch.handle_message("P", "import from notes.txt")
+    assert "2 records" in staged.text
+    (workdir / "bad.json").write_text("{nope", encoding="utf-8")
+    response = orch.handle_message("P", "import from bad.json")
+    assert "could not parse" in response.text
+    missing = orch.handle_message("P", "import from missing.txt")
+    assert "could not read" in missing.text
+
+
+def test_github_read_intent(orch, monkeypatch):
+    import base64
+    import httpx
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "content": base64.b64encode(b"readme text").decode(),
+                "encoding": "base64",
+            }
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: Resp())
+    response = orch.handle_message("P", "github read octo/demo README.md")
+    assert "readme text" in response.text
+
+
+def test_github_open_pr_flow(orch, monkeypatch):
+    import httpx
+
+    posts = []
+
+    def fake_post(url, **kwargs):
+        posts.append((url, kwargs))
+
+        class Resp:
+            status_code = 201
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"number": 9, "html_url": "http://x/pr/9"}
+
+        return Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setenv("MITRA_GITHUB_TOKEN", "tok")
+    staged = orch.handle_message(
+        "P", "github open pr octo/demo from feat to main titled Cool thing"
+    )
+    assert staged.approval_request is not None
+    assert posts == []
+    done = orch.handle_message("P", "approve " + staged.approval_request.proposal_id)
+    assert "Opened PR #9" in done.text
+    assert len(posts) == 1
+    assert posts[0][0].endswith("/repos/octo/demo/pulls")
+
+
+def test_calendar_intent(orch, monkeypatch):
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.shutil.which", lambda n: "/usr/bin/osascript"
+    )
+
+    class Done:
+        stdout = "Standup | Monday\n"
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.subprocess.run", lambda *a, **k: Done()
+    )
+    response = orch.handle_message("P", "what is on my calendar?")
+    assert "Standup" in response.text
+
+
+def test_mail_intent(orch, monkeypatch):
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.shutil.which", lambda n: "/usr/bin/osascript"
+    )
+
+    class Done:
+        stdout = "Hello | a@b.c\n"
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.subprocess.run", lambda *a, **k: Done()
+    )
+    assert "Hello" in orch.handle_message("P", "check my inbox").text

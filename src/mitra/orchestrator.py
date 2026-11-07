@@ -7,12 +7,20 @@ intent parsing ships first; model driven planning is a later gated upgrade.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import MitraConfig, ShellConfig, default_config
-from .memory.store import MemoryHit, MemoryRecord, MemoryStore
+from .memory.store import VALID_KINDS, MemoryHit, MemoryRecord, MemoryStore
+from .memory.vectors import (
+    EmbeddingError,
+    OllamaEmbeddingBackend,
+    VectorIndex,
+    embed_record,
+    recall_hybrid,
+)
 from .tools.shell_tool import execute_approved_shell
 from .providers.base import DRAFT_MARKER, ModelProvider, ProviderError
 from .providers.mock import MockProvider
@@ -20,12 +28,26 @@ from .security.audit import AuditLog
 from .security.policy import ApprovalGate, Policy
 from .tools.base import ToolContext
 from .tools.file_tools import execute_approved_write
+from .tools.github_tools import execute_approved_pr
 from .tools.registry import ToolRegistry, default_registry
 
 RENDER_INSTRUCTIONS = (
-    "You are Mitra, a personal AI companion. Rephrase the draft below "
-    "conversationally. Stick to the facts in the evidence. Never invent "
-    "decisions, files, or events. Keep sources visible.\n\n" + DRAFT_MARKER + "\n"
+    "You are Mitra, a personal AI companion talking with someone you know "
+    "well. Rephrase the draft below conversationally. Stick to the facts "
+    "in the evidence. Never invent decisions, files, or events. Keep "
+    "sources visible. Output only the answer itself: no greeting, no "
+    "preamble, no announcement that you rephrased anything, no stock "
+    "openers. Just continue the conversation.\n\n" + DRAFT_MARKER + "\n"
+)
+
+OPEN_CHAT_INSTRUCTIONS = (
+    "You are Mitra, a personal AI companion in an ongoing conversation "
+    "with someone you know well. Answer the user directly and helpfully. "
+    "Apply the standing instructions. Use the memory context when relevant "
+    "and cite sources for remembered facts. For general questions with no "
+    "stored facts, answer from your own knowledge. Do not greet unless "
+    "they greet you. Never open with stock phrases or announcements. Just "
+    "continue the conversation naturally."
 )
 
 _TOPIC_STOPWORDS = frozenset(
@@ -62,6 +84,8 @@ class _Intent:
     kind: str
     arg: str = ""
     arg2: str = ""
+    arg3: str = ""
+    arg4: str = ""
 
 
 def _topic_hint(text: str) -> str:
@@ -81,6 +105,40 @@ def _kind_for_fact(text: str) -> str:
     if lowered.startswith("todo") or "task" in lowered:
         return "task"
     return "fact"
+
+
+MAX_IMPORT_RECORDS = 200
+
+
+def _parse_import_file(target: str, content: str) -> list[dict[str, str]]:
+    """Parse user supplied import data. JSON stays structured, plain text
+    becomes one note per non empty line. Raises ValueError when unreadable."""
+    suffix = target.rsplit(".", 1)[-1].lower() if "." in target else ""
+    records: list[dict[str, str]] = []
+    if suffix == "json":
+        try:
+            data = json.loads(content)
+        except ValueError as exc:
+            raise ValueError("invalid JSON: %s." % exc)
+        items = data.get("memories", data) if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise ValueError("JSON must hold a list or a memories list object.")
+        for item in items:
+            if isinstance(item, str):
+                records.append({"kind": "note", "text": item.strip()})
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                kind = str(item.get("kind", "note")).strip() or "note"
+                if kind not in VALID_KINDS:
+                    raise ValueError("unknown kind '%s'." % kind)
+                records.append({"kind": kind, "text": item["text"].strip()})
+            else:
+                raise ValueError("each item needs a text field.")
+    else:
+        for line in content.splitlines():
+            cleaned = line.strip().lstrip("-*").strip()
+            if cleaned:
+                records.append({"kind": "note", "text": cleaned})
+    return [r for r in records if r["text"]][:MAX_IMPORT_RECORDS]
 
 
 def _parse(message: str) -> _Intent:
@@ -185,6 +243,67 @@ def _parse(message: str) -> _Intent:
     match = re.match(r"(?is)^\s*(?:run|shell|exec)\s*:?\s*(.+)$", text)
     if match:
         return _Intent(kind="run_shell", arg=match.group(1).strip())
+    match = re.match(r"(?is)^\s*import\s+(?:memories\s+)?from\s+(.+?)\s*$", text)
+    if match:
+        target = match.group(1).strip().strip("\"'")
+        return _Intent(kind="import_memories", arg=target)
+    match = re.match(
+        r"(?is)^\s*github\s+(?:read|show|get)\s+(\S+)\s+(\S+?)(?:\s+at\s+(\S+))?\s*$",
+        text,
+    )
+    if match:
+        return _Intent(
+            kind="github_read",
+            arg=match.group(1).strip(),
+            arg2=match.group(2).strip(),
+            arg3=(match.group(3) or "").strip(),
+        )
+    match = re.match(r"(?is)^\s*github\s+(?:prs|pulls)\s+(\S+)(?:\s+(open|closed|all))?\s*$", text)
+    if match:
+        return _Intent(
+            kind="github_prs",
+            arg=match.group(1).strip(),
+            arg2=(match.group(2) or "").strip(),
+        )
+    match = re.match(
+        r"(?is)^\s*github\s+open\s+pr\s+(\S+)\s+from\s+(\S+)\s+to\s+(\S+)\s+titled\s+(.+)$",
+        text,
+    )
+    if match:
+        return _Intent(
+            kind="github_open_pr",
+            arg=match.group(1).strip(),
+            arg2=match.group(2).strip(),
+            arg3=match.group(3).strip(),
+            arg4=match.group(4).strip(),
+        )
+    if any(
+        marker in lowered
+        for marker in (
+            "calendar",
+            "upcoming events",
+            "my schedule",
+            "what is on",
+            "whats on",
+        )
+    ):
+        days = ""
+        day_match = re.search(r"(\d+)\s*days?", lowered)
+        if day_match:
+            days = day_match.group(1)
+        return _Intent(kind="calendar_next", arg=days)
+    if any(
+        marker in lowered
+        for marker in (
+            "inbox",
+            "recent mail",
+            "recent email",
+            "my mail",
+            "my email",
+            "check mail",
+        )
+    ):
+        return _Intent(kind="mail_recent")
 
     if re.search(r"(?is)\bread\b", text):
         return _Intent(kind="read_file", arg=text)
@@ -221,6 +340,8 @@ class Orchestrator:
         registry: ToolRegistry,
         gate: ApprovalGate,
         policy: Policy,
+        embedding=None,
+        vindex=None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -229,11 +350,15 @@ class Orchestrator:
         self.registry = registry
         self.gate = gate
         self.policy = policy
+        self.embedding = embedding
+        self.vindex = vindex
 
     def close(self) -> None:
         self.memory.close()
         self.audit.close()
         self.gate.close()
+        if self.vindex is not None:
+            self.vindex.close()
 
     def handle_message(self, project: str, message: str) -> OrchestratorResponse:
         """Run one orchestration pass over a user message."""
@@ -248,6 +373,8 @@ class Orchestrator:
             gate=self.gate,
             audit=self.audit,
             shell=self.policy.shell or self.config.shell,
+            fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
+            fetch_private_hosts=self.config.tools.fetch_private_hosts,
         )
         handler = {
             "remember": self._remember,
@@ -264,6 +391,12 @@ class Orchestrator:
             "search_files": self._search_files,
             "fetch_url": self._fetch_url,
             "run_shell": self._run_shell,
+            "import_memories": self._import_memories,
+            "github_read": self._github_read,
+            "github_prs": self._github_prs,
+            "github_open_pr": self._github_open_pr,
+            "calendar_next": self._calendar_next,
+            "mail_recent": self._mail_recent,
             "stage_write": self._stage_write,
             "update_needs_content": self._update_needs_content,
             "approve": self._approve,
@@ -273,22 +406,47 @@ class Orchestrator:
             "chat": self._chat,
         }.get(intent.kind, self._chat)
         draft, actions, approval, evidence = handler(ctx, intent)
-        text = self._render(ctx, draft, evidence)
+        text = self._render(ctx, intent, message, draft, evidence)
         return OrchestratorResponse(
             text=text, actions=actions, approval_request=approval, evidence=evidence
         )
 
-    def _render(
-        self, ctx: ToolContext, draft: str, evidence: list[EvidenceItem]
-    ) -> str:
-        context_lines = [
+    def _open_prompt(self, message: str, evidence: list[EvidenceItem]) -> str:
+        lines = [
             "- %s (source: %s, updated %s)" % (e.text, e.source, e.updated)
             for e in evidence
         ]
+        return (
+            OPEN_CHAT_INSTRUCTIONS
+            + "\n\nMEMORY CONTEXT:\n"
+            + ("\n".join(lines) if lines else "(none stored)")
+            + "\n\nUSER:\n"
+            + message
+        )
+
+    def _render(
+        self,
+        ctx: ToolContext,
+        intent: _Intent,
+        message: str,
+        draft: str,
+        evidence: list[EvidenceItem],
+    ) -> str:
+        open_answer = intent.kind == "chat" and self.provider.can_reason
+        if open_answer:
+            prompt: str = self._open_prompt(message, evidence)
+            context = ""
+        else:
+            context_lines = [
+                "- %s (source: %s, updated %s)" % (e.text, e.source, e.updated)
+                for e in evidence
+            ]
+            prompt = RENDER_INSTRUCTIONS + draft
+            context = "\n".join(context_lines)
         try:
-            generation = self.provider.generate(
-                RENDER_INSTRUCTIONS + draft, "\n".join(context_lines)
-            )
+            generation = self.provider.generate(prompt, context)
+            if open_answer and not generation.text.strip():
+                return draft
             return generation.text
         except ProviderError as exc:
             self.audit.log(
@@ -303,6 +461,21 @@ class Orchestrator:
                 "I could not reach the configured model (%s). "
                 "Here is the direct result:\n\n%s" % (exc, draft)
             )
+
+    def _hybrid(self, project: str, query: str, limit: int) -> list[MemoryHit]:
+        if self.embedding is None or self.vindex is None:
+            return self.memory.recall(project, query, limit=limit)
+        return recall_hybrid(
+            self.memory, self.vindex, self.embedding, project, query, limit=limit
+        )
+
+    def _embed_best_effort(self, record: MemoryRecord) -> None:
+        if self.embedding is None or self.vindex is None:
+            return
+        try:
+            embed_record(self.vindex, self.embedding, record)
+        except EmbeddingError:
+            pass
 
     def _remember(
         self, ctx: ToolContext, intent: _Intent
@@ -321,6 +494,7 @@ class Orchestrator:
             rationale="Explicit remember request.",
             result=record.text[:120],
         )
+        self._embed_best_effort(record)
         draft = "Noted for %s. Saved as %s:\n%s" % (ctx.project, kind, record.text)
         return draft, ["memory_add:%d" % record.id], None, _evidence_from_records([record])
 
@@ -341,6 +515,7 @@ class Orchestrator:
             rationale="Explicit correction; older matches superseded.",
             result=record.text[:120],
         )
+        self._embed_best_effort(record)
         draft = "Correction saved for %s. It now overrides older notes on '%s'." % (
             ctx.project,
             topic or "this topic",
@@ -350,7 +525,7 @@ class Orchestrator:
     def _recall(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
-        hits = self.memory.recall(ctx.project, intent.arg, limit=5)
+        hits = self._hybrid(ctx.project, intent.arg, limit=5)
         if not hits:
             return (
                 "I have nothing saved about that for %s yet." % ctx.project,
@@ -491,6 +666,8 @@ class Orchestrator:
             gate=self.gate,
             audit=self.audit,
             shell=self.policy.shell or self.config.shell,
+            fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
+            fetch_private_hosts=self.config.tools.fetch_private_hosts,
         )
         proposal = self.gate.get(proposal_id)
         if proposal is None:
@@ -544,14 +721,86 @@ class Orchestrator:
                 "Approved and ran the command.\n%s" % result.output,
                 "run_executed:" + proposal.id,
             )
-        result = execute_approved_write(proposal.id, token, ctx)
-        if not result.ok:
+        if proposal.action == "github_open_pr":
+            result = execute_approved_pr(proposal.id, token, ctx)
+            if not result.ok:
+                return (
+                    False,
+                    "Approved, but GitHub failed: %s" % result.error,
+                    "pr_execute:error",
+                )
+            return True, "Approved. %s" % result.output, "pr_executed:" + proposal.id
+        if proposal.action == "memory_import":
+            return self._execute_import(ctx, proposal, token)
+        if proposal.action == "write_file":
+            result = execute_approved_write(proposal.id, token, ctx)
+            if not result.ok:
+                return (
+                    False,
+                    "Approved, but the write failed: %s" % result.error,
+                    "write_execute:error",
+                )
+            return (
+                True,
+                "Approved and wrote %s." % result.target,
+                "write_executed:" + proposal.id,
+            )
+        return (
+            False,
+            "Unknown proposal action '%s'." % proposal.action,
+            "execute:error",
+        )
+
+    def _execute_import(
+        self, ctx: ToolContext, proposal, token: str
+    ) -> tuple[bool, str, str]:
+        if not self.gate.consume(proposal.id, token):
+            self.audit.log(
+                actor="user",
+                project=ctx.project,
+                action="memory_import",
+                target=proposal.target,
+                decision="denied",
+                rationale="Approval token invalid, already used, or not approved.",
+            )
             return (
                 False,
-                "Approved, but the write failed: %s" % result.error,
-                "write_execute:error",
+                "Approval missing or already used for '%s'." % proposal.id,
+                "import_execute:error",
             )
-        return True, "Approved and wrote %s." % result.target, "write_executed:" + proposal.id
+        try:
+            items = json.loads(proposal.details)
+        except ValueError:
+            return False, "Import data is unreadable.", "import_execute:error"
+        source = "import:" + proposal.target.rsplit("/", 1)[-1]
+        count = 0
+        for item in items:
+            try:
+                record = self.memory.add(
+                    proposal.project,
+                    item.get("kind", "note"),
+                    item.get("text", ""),
+                    source=source,
+                )
+            except (ValueError, AttributeError):
+                continue
+            count += 1
+            if count <= 100:
+                self._embed_best_effort(record)
+        self.audit.log(
+            actor="user",
+            project=proposal.project,
+            action="memory_import",
+            target=proposal.target,
+            decision="allowed",
+            rationale="Proposal %s approved and executed." % proposal.id,
+            result="%d records imported" % count,
+        )
+        return (
+            True,
+            "Approved and imported %d records into %s." % (count, proposal.project),
+            "import_executed:" + proposal.id,
+        )
 
     def _approve(
         self, ctx: ToolContext, intent: _Intent
@@ -652,6 +901,7 @@ class Orchestrator:
             rationale="Standing instruction saved.",
             result=record.text[:120],
         )
+        self._embed_best_effort(record)
         draft = "Standing instruction saved for %s. I will apply it in our chats." % (
             ctx.project
         )
@@ -721,6 +971,179 @@ class Orchestrator:
         )
         return draft, ["run_proposed:%s" % result.proposal_id], approval, []
 
+    def _import_memories(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("read_file")
+        assert tool is not None
+        result = tool.invoke({"path": intent.arg}, ctx)
+        if not result.ok:
+            return (
+                "I could not read that import file: %s" % result.error,
+                ["import:error"],
+                None,
+                [],
+            )
+        try:
+            records = _parse_import_file(result.target, result.output)
+        except ValueError as exc:
+            return (
+                "I could not parse that import file: %s" % exc,
+                ["import:error"],
+                None,
+                [],
+            )
+        if not records:
+            return "That file holds no importable records.", ["import:empty"], None, []
+        proposal = self.gate.stage(
+            action="memory_import",
+            target=result.target,
+            details=json.dumps(records),
+            project=ctx.project,
+        )
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="memory_import",
+            target=result.target,
+            decision="approval_requested",
+            rationale="Proposal %s staged." % proposal.id,
+            result="%d records proposed" % len(records),
+        )
+        preview_lines = ["[%s] %s" % (r["kind"], r["text"][:80]) for r in records[:5]]
+        if len(records) > 5:
+            preview_lines.append("... and %d more" % (len(records) - 5))
+        preview = "\n".join(preview_lines)
+        draft = (
+            "I found %d records in %s. Proposal %s is staged.\nPreview:\n%s\n\n"
+            "Reply 'approve %s' to import, or 'deny %s' to discard."
+            % (
+                len(records),
+                result.target,
+                proposal.id,
+                preview,
+                proposal.id,
+                proposal.id,
+            )
+        )
+        approval = ApprovalRequest(
+            action="memory_import",
+            target=result.target,
+            proposal_id=proposal.id,
+            preview=preview,
+        )
+        return draft, ["import_proposed:%s" % proposal.id], approval, []
+
+    def _github_read(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("github_read_file")
+        assert tool is not None
+        result = tool.invoke(
+            {"repo": intent.arg, "path": intent.arg2, "ref": intent.arg3}, ctx
+        )
+        if not result.ok:
+            return (
+                "I could not read that repo file: %s" % result.error,
+                ["github_read:error"],
+                None,
+                [],
+            )
+        evidence = [
+            EvidenceItem(
+                text="repo file shown above",
+                source="%s:%s" % (intent.arg, intent.arg2),
+                updated="now",
+            )
+        ]
+        return result.output, ["github_read:ok"], None, evidence
+
+    def _github_prs(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("github_list_prs")
+        assert tool is not None
+        result = tool.invoke({"repo": intent.arg, "state": intent.arg2 or "open"}, ctx)
+        if not result.ok:
+            return (
+                "I could not list pull requests: %s" % result.error,
+                ["github_prs:error"],
+                None,
+                [],
+            )
+        return result.output, ["github_prs:ok"], None, []
+
+    def _github_open_pr(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("github_open_pr")
+        assert tool is not None
+        result = tool.invoke(
+            {
+                "repo": intent.arg,
+                "title": intent.arg4,
+                "head": intent.arg2,
+                "base": intent.arg3,
+                "body": "",
+            },
+            ctx,
+        )
+        if not result.ok:
+            return (
+                "I could not stage that pull request: %s" % result.error,
+                ["pr_propose:error"],
+                None,
+                [],
+            )
+        preview = "%s (%s into %s)" % (intent.arg4, intent.arg2, intent.arg3)
+        draft = (
+            "I staged this pull request for your approval:\n%s\nProposal: %s\n"
+            "Reply 'approve %s' to open it, or 'deny %s' to discard."
+            % (
+                preview,
+                result.proposal_id,
+                result.proposal_id,
+                result.proposal_id,
+            )
+        )
+        approval = ApprovalRequest(
+            action="github_open_pr",
+            target=result.target,
+            proposal_id=result.proposal_id,
+            preview=preview,
+        )
+        return draft, ["pr_proposed:%s" % result.proposal_id], approval, []
+
+    def _calendar_next(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("calendar_next")
+        assert tool is not None
+        result = tool.invoke({"days": intent.arg or 7}, ctx)
+        if not result.ok:
+            return (
+                "I could not check the calendar: %s" % result.error,
+                ["calendar:error"],
+                None,
+                [],
+            )
+        return result.output, ["calendar:ok"], None, []
+
+    def _mail_recent(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("mail_recent")
+        assert tool is not None
+        result = tool.invoke({}, ctx)
+        if not result.ok:
+            return (
+                "I could not check mail: %s" % result.error,
+                ["mail:error"],
+                None,
+                [],
+            )
+        return result.output, ["mail:ok"], None, []
+
     def _pending(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
@@ -755,7 +1178,13 @@ class Orchestrator:
             "list [dir] : list a directory in scope\n"
             "search <pattern> : find files by name\n"
             "fetch <url> : fetch a page as text\n"
-            "run <command> : stage an allowlisted shell command\n\nTools:\n%s"
+            "run <command> : stage an allowlisted shell command\n"
+            "import memories from <file> : preview and stage an import\n"
+            "github read <repo> <path> : read a repo file\n"
+            "github prs <repo> : list pull requests\n"
+            "github open pr <repo> from <head> to <base> titled <title>\n"
+            "calendar : upcoming events\n"
+            "check mail : recent inbox subjects\n\nTools:\n%s"
             % (ctx.project, "\n".join(tool_lines))
         )
         return draft, [], None, []
@@ -763,7 +1192,7 @@ class Orchestrator:
     def _chat(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
-        hits = self.memory.recall(ctx.project, intent.arg, limit=3)
+        hits = self._hybrid(ctx.project, intent.arg, limit=3)
         standing = self._standing(ctx.project)
         prefix = ""
         if standing:
@@ -800,19 +1229,32 @@ def build_orchestrator(
 
     cfg = config or default_config()
     db_path = cfg.resolve_db_path()
+    embedding = None
+    vindex = None
+    if cfg.memory.embeddings == "ollama":
+        embedding = OllamaEmbeddingBackend(
+            model=cfg.memory.embed_model, base_url=cfg.memory.embed_base_url
+        )
+        vindex = VectorIndex(db_path)
     return Orchestrator(
         config=cfg,
         provider=provider or build_provider(cfg),
         memory=memory or MemoryStore(db_path),
         audit=audit or AuditLog(db_path),
         registry=registry or default_registry(),
-        gate=gate or ApprovalGate(db_path, ttl_seconds=cfg.approvals.ttl_seconds),
+        gate=gate or ApprovalGate(
+            db_path,
+            ttl_seconds=cfg.approvals.ttl_seconds,
+            retain_days=cfg.approvals.retain_days,
+        ),
         policy=policy or Policy(cfg.resolve_allowed_dirs(), shell=cfg.shell),
+        embedding=embedding,
+        vindex=vindex,
     )
 
 
 def build_test_orchestrator(
-    tmp_dir: str | Path, shell: ShellConfig | None = None
+    tmp_dir: str | Path, shell: ShellConfig | None = None, embedding=None
 ) -> Orchestrator:
     """In memory style orchestrator for tests. No network, no keys."""
     base = Path(tmp_dir)
@@ -825,4 +1267,6 @@ def build_test_orchestrator(
         registry=default_registry(),
         gate=ApprovalGate(db_path),
         policy=Policy([base], shell=shell),
+        embedding=embedding,
+        vindex=VectorIndex(db_path) if embedding is not None else None,
     )

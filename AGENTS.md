@@ -37,6 +37,8 @@ python -m mitra.api               # local API, host and port from config
 1. Subclass `Tool` in `tools/`, set `read_only` honestly.
 2. Register it in the default registry.
 3. Add policy coverage in `security/policy.py` (allowed, approval, denied).
+   Shell style tools also honor deny patterns; network tools validate
+   hosts per hop like fetch does.
 4. Mutating tools stage persistent proposals and execute through the shared
    `decide` path. Never invent a second approval flow.
 5. Add audit entries through the audit helper, never ad hoc prints.

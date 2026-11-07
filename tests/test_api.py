@@ -126,6 +126,15 @@ allowed_dirs = ["beta"]
     assert status["profile"] == "Alpha"
 
 
+def test_audit_verify_endpoint(orch):
+    client = TestClient(build_app(orch))
+    orch.handle_message("P", "Remember that P uses tabs.")
+    body = client.get("/audit/verify", params={"project": "P"}).json()
+    assert body["ok"] is True
+    assert body["checked"] >= 1
+    assert body["bad_id"] == 0
+
+
 def test_web_hud_served(orch):
     client = TestClient(build_app(orch))
     page = client.get("/")

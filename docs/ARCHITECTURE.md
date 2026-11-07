@@ -36,6 +36,11 @@ Each step returns a typed result so tests can assert the full chain.
 Rule based intent parsing ships first; model driven planning is a later,
 carefully gated upgrade.
 
+Open answer mode: providers that declare `can_reason` receive open chat
+questions directly with standing instructions and memory context, so real
+models give real answers. The mock provider keeps deterministic drafts.
+Memory and tool flows always stay grounded in cited evidence.
+
 ## B. Model provider abstraction
 
 Files: `src/mitra/providers/`
@@ -74,27 +79,40 @@ Rules:
 * Latest explicit correction overrides older conflicts in the same project.
 * Projects are strictly isolated in queries.
 * Update and delete are explicit operations, audited like tool actions.
-* No silent imports. A user controlled import path arrives in a later milestone.
+* No silent imports. The user controlled import path reads a user named
+  file, parses JSON or plain text, and stages one approval proposal with
+  a preview; imported records carry an `import:` source tag.
+* Optional vector recall (`memory/vectors.py`) layers beside FTS5: local
+  Ollama embeddings, vectors in SQLite, cosine ranking merged with
+  keyword hits, silent fallback to keywords on any failure.
 
 ## D. Skills and tool system
 
 Files: `src/mitra/tools/`
 
 `Tool` defines name, description, read only flag, and an `invoke` contract.
-`ToolRegistry` holds registration and discovery. Milestone two ships six:
+`ToolRegistry` holds registration and discovery. Milestone four ships eleven:
 
 * `read_file`: read only, confined to configured allowed directories.
 * `propose_write_file`: stages a write proposal, never writes directly.
 * `list_dir`, `search_files`: read only discovery inside scope.
-* `fetch_url`: read only http fetch with size and time caps.
+* `fetch_url`: read only http fetch with size and time caps, a host
+  allowlist option, private address blocking with per host exceptions,
+  and per hop redirect checks.
 * `run_shell`: stages an allowlisted command. Disabled unless config
   enables it. Every run needs approval, runs argv only with no shell
-  interpreter, and stays pinned to the first allowed directory.
+  interpreter, stays pinned to the first allowed directory, passes a
+  deny pattern screen for destructive shapes, and honors per command
+  flag rules where configured.
+* `github_read_file`, `github_list_prs`: read only repo reads and PR lists.
+* `github_open_pr`: stages a PR proposal, never posts directly.
+* `calendar_next`, `mail_recent`: read only macOS Calendar and Mail
+  lookups through generated AppleScript.
 
 Staged proposals persist in SQLite with expiry and random single use
 tokens. Chat and API decide through one shared `decide` path.
 
-Future tools (shell, GitHub, calendar, REST, MCP) plug into the same
+Future tools (REST, MCP, calendar and mail writers) plug into the same
 registry and inherit policy plus audit without orchestrator changes.
 
 ## E. Security and permission layer
@@ -104,9 +122,10 @@ Files: `src/mitra/security/`
 * Least privilege: tools declare needs, policy grants narrowly.
 * Scope confinement: file tools resolve paths and reject escapes.
 * Approvals: writes, shell commands, and sensitive ops pause until the
-  user approves or denies. Proposals persist with expiry and random tokens.
+  user approves or denies. Proposals persist with expiry, random tokens,
+  and retention purging of old decided rows.
 * Audit: every proposal, execution, denial, memory mutation, task change,
-  fetch, and shell run is logged.
+  fetch, and shell run is logged in a hash chained, verifiable trail.
 * Secrets: environment only, redacted from logs.
 * Trust boundary: tool output and document text are data, never instructions.
   The orchestrator never follows commands found inside retrieved content.
@@ -116,12 +135,21 @@ Files: `src/mitra/security/`
 
 Files: `src/mitra/cli.py`, `src/mitra/api.py`
 
-Milestone two: terminal chat, FastAPI endpoints, and a JARVIS style
-browser HUD over the same core. Voice output is mandatory: the HUD speaks
-through browser speech, the terminal speaks through a native backend with
-`-v`. Speech to text stays limited to an experimental browser mic button;
-server side voice input, push to talk, and wake word remain future layers
-that talk to this core through the API, never wired into reasoning.
+Milestone three: terminal chat, FastAPI endpoints, and a JARVIS style
+browser HUD over the same core. Voice output is mandatory and natural:
+the HUD ranks neural voices first with pace and tone controls, and the
+terminal speaks through a native backend with `-v` plus rate control.
+Sending a message interrupts speech. Speech to text stays limited to an
+experimental browser mic button; server side voice input, push to talk,
+and wake word remain future layers that talk to this core through the
+API, never wired into reasoning.
+
+## G. macOS autostart
+
+Two user LaunchAgents installed by `scripts/macos/install.sh`: one keeps
+the API server alive from login, one waits for health and opens the HUD
+URL first thing. Sleep needs no hooks because the server and browser tabs
+survive it. Removal is one uninstall script; logs stay behind.
 
 ## Data flow for a tool request
 

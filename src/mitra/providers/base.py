@@ -23,6 +23,7 @@ class ModelProvider(ABC):
     """One method contract. prompt carries instructions plus draft."""
 
     name: str = "base"
+    can_reason: bool = False
 
     @abstractmethod
     def generate(self, prompt: str, context: str = "") -> Generation:

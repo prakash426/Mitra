@@ -21,7 +21,6 @@
   </div>
   <div class="clock-box"><span id="clock">00:00:00</span><span id="date"></span></div>
   <div class="toggles">
-    <select id="voice-select" title="Voice"></select>
     <button id="voice-toggle" class="pill on" type="button">VOICE ON</button>
     <button id="sound-toggle" class="pill on" type="button">SOUND ON</button>
   </div>
@@ -43,6 +42,15 @@
   </aside>
   <section id="center">
     <div id="reactor-wrap"><canvas id="reactor"></canvas></div>
+    <div id="voicebar">
+      <label for="voice-select">VOICE</label>
+      <select id="voice-select" title="Voice"></select>
+      <label for="rate">PACE</label>
+      <input id="rate" type="range" min="0.8" max="1.2" step="0.01" value="0.98">
+      <label for="pitch">TONE</label>
+      <input id="pitch" type="range" min="0.8" max="1.2" step="0.01" value="1">
+      <button id="voice-test" type="button">TEST</button>
+    </div>
     <div id="transcript" aria-live="polite"></div>
     <div id="composer">
       <button id="mic" type="button" title="Voice input">MIC</button>

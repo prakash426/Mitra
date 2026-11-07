@@ -132,3 +132,61 @@ def test_shell_and_speech_sections(tmp_path):
     bad_shell = VALID_TOML + '\n[shell]\nallowlist = ["../bin/x"]\n'
     with pytest.raises(ConfigError, match="bare command"):
         load_config(_write(tmp_path, bad_shell))
+
+
+def test_hardening_sections(tmp_path):
+    config = load_config(_write(tmp_path))
+    assert config.tools.fetch_allowed_hosts == ()
+    assert config.approvals.retain_days == 30
+    assert len(config.shell.deny_regexes) >= 5
+    custom = (
+        VALID_TOML.replace(
+            'allowed_dirs = ["projects"]',
+            'allowed_dirs = ["."]\nfetch_allowed_hosts = ["Example.com"]',
+        )
+        + "\n[approvals]\nretain_days = 7\n"
+        + '\n[shell]\ndeny_regexes = ["danger-zone"]\n'
+    )
+    config2 = load_config(_write(tmp_path, custom))
+    assert config2.tools.fetch_allowed_hosts == ("example.com",)
+    assert config2.approvals.retain_days == 7
+    assert config2.shell.deny_regexes == ("danger-zone",)
+    bad_deny = VALID_TOML + '\n[shell]\ndeny_regexes = ["(["]\n'
+    with pytest.raises(ConfigError, match="bad pattern"):
+        load_config(_write(tmp_path, bad_deny))
+    bad_retain = VALID_TOML + "\n[approvals]\nretain_days = 0\n"
+    with pytest.raises(ConfigError, match="retain_days"):
+        load_config(_write(tmp_path, bad_retain))
+
+
+def test_flag_rules_and_private_hosts(tmp_path):
+    custom = (
+        VALID_TOML.replace(
+            'allowed_dirs = ["projects"]',
+            'allowed_dirs = ["."]\nfetch_private_hosts = ["Printer.Local"]',
+        )
+        + '\n[shell]\nallowlist = ["git"]\nflag_rules = { git = ["status"] }\n'
+    )
+    config = load_config(_write(tmp_path, custom))
+    assert config.tools.fetch_private_hosts == ("printer.local",)
+    assert config.shell.flag_rules == {"git": ("status",)}
+    bad = VALID_TOML + '\n[shell]\nflag_rules = { git = "status" }\n'
+    with pytest.raises(ConfigError, match="list of flags"):
+        load_config(_write(tmp_path, bad))
+
+
+def test_embeddings_section(tmp_path):
+    config = load_config(_write(tmp_path))
+    assert config.memory.embeddings == "off"
+    custom = VALID_TOML.replace(
+        'db_path = "data/mitra.db"',
+        'db_path = "m.db"\nembeddings = "ollama"\nembed_model = "m"',
+    )
+    config2 = load_config(_write(tmp_path, custom))
+    assert config2.memory.embeddings == "ollama"
+    assert config2.memory.embed_model == "m"
+    bad = VALID_TOML.replace(
+        'db_path = "data/mitra.db"', 'db_path = "m.db"\nembeddings = "bogus"'
+    )
+    with pytest.raises(ConfigError, match="Unknown embeddings"):
+        load_config(_write(tmp_path, bad))
