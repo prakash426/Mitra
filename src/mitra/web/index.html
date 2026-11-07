@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MITRA Interface</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="boot">
+  <div class="boot-box">
+    <div class="boot-title">MITRA</div>
+    <div id="boot-lines"></div>
+  </div>
+</div>
+<header id="topbar">
+  <div class="brand">MITRA <span class="brand-sub">INTERFACE</span></div>
+  <div class="project-box">
+    <label for="project">PROJECT</label>
+    <input id="project" value="default" maxlength="40" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="clock-box"><span id="clock">00:00:00</span><span id="date"></span></div>
+  <div class="toggles">
+    <select id="voice-select" title="Voice"></select>
+    <button id="voice-toggle" class="pill on" type="button">VOICE ON</button>
+    <button id="sound-toggle" class="pill on" type="button">SOUND ON</button>
+  </div>
+</header>
+<main id="grid">
+  <aside id="left">
+    <section class="panel">
+      <h2>SYSTEM</h2>
+      <dl id="system-list"></dl>
+    </section>
+    <section class="panel grow">
+      <h2>TASKS</h2>
+      <ul id="task-list"></ul>
+      <div class="row">
+        <input id="task-input" placeholder="New task" maxlength="120" autocomplete="off">
+        <button id="task-add" type="button">ADD</button>
+      </div>
+    </section>
+  </aside>
+  <section id="center">
+    <div id="reactor-wrap"><canvas id="reactor"></canvas></div>
+    <div id="transcript" aria-live="polite"></div>
+    <div id="composer">
+      <button id="mic" type="button" title="Voice input">MIC</button>
+      <input id="input" placeholder="Talk to Mitra" autocomplete="off" maxlength="2000">
+      <button id="send" type="button">SEND</button>
+    </div>
+  </section>
+  <aside id="right">
+    <section class="panel grow">
+      <h2>APPROVALS</h2>
+      <div id="approvals"></div>
+    </section>
+    <section class="panel grow">
+      <h2>MEMORY</h2>
+      <div id="memory"></div>
+      <button id="memory-refresh" type="button">REFRESH</button>
+    </section>
+  </aside>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

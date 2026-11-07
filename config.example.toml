@@ -1,0 +1,47 @@
+# Copy to config.toml and adjust. No secrets in this file.
+# Secrets come from the environment only. See .env.example.
+
+[provider]
+# One of: mock, ollama, openai_compat
+name = "mock"
+model = "mock-echo"
+# Used by ollama and openai_compat.
+base_url = "http://localhost:11434"
+# Timeout in seconds for model calls.
+timeout_seconds = 30
+
+[memory]
+# SQLite path. Relative paths resolve from the project directory.
+db_path = "mitra.db"
+
+[tools]
+# Directories the file tools may touch. Keep this narrow.
+allowed_dirs = ["."]
+
+[api]
+host = "127.0.0.1"
+port = 8931
+
+[approvals]
+# Pending proposals expire after this many seconds.
+ttl_seconds = 3600
+
+[shell]
+# Disabled by default. Enable only with a narrow allowlist.
+enabled = false
+allowlist = ["ls", "pwd", "echo"]
+timeout_seconds = 30
+max_output_chars = 20000
+
+[speech]
+# One of: silent, say (macOS speech for terminal voice output).
+backend = "silent"
+voice = "Samantha"
+
+# Per project profiles. Each section overrides base settings for that project.
+# Supported keys: provider, model, allowed_dirs, shell_enabled.
+[profiles.CancerLens]
+provider = "mock"
+model = "mock-echo"
+allowed_dirs = ["."]
+shell_enabled = false
