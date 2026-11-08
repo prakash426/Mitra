@@ -132,11 +132,17 @@ suggestion for what to do first.
 
 * Remember and recall project scoped facts with sources and timestamps.
 * Save several facts from one message; recall groups the whole topic.
+* Answer how to questions with the exact command to send.
+* Run a one click morning scan: today, inbox, open work, first move.
 * Keep short term chat context, so followups resolve without repeats.
 * Correct earlier facts; the latest explicit correction wins.
 * Keep standing instructions that surface in every chat.
 * Greet each launch with a recap plus suggestions for what is next.
-* Track tasks with open, doing, and done states.
+* Track tasks with open, doing, and done states, plus due dates.
+* Print standup: done, now, and blocked in one view.
+* Book calendar events through the approval flow.
+* Watch GitHub repos; open PRs join the morning scan.
+* Save pages to memory and export notes to markdown.
 * Read files inside allowed directories and summarize them.
 * List directories, search file names, and fetch pages as text.
 * Propose file writes and wait for your approval before touching disk.
@@ -173,7 +179,12 @@ Try it:
 > import memories from notes.md
 > github read octocat/Hello-World README.md
 > what is on my calendar in the next 7 days?
+> addevent Team lunch on 2026-11-10 at 12:30 for 45
 > check my inbox
+> due 1 2026-11-10
+> standup
+> remember page https://example.com/article
+> export notes
 > plan: list the notes directory and then read the README
 > compare deploy steps across CancerLens and Demo
 > mcp notes search {"query": "release"}
@@ -184,6 +195,15 @@ Try it:
 
 Writes and shell commands stage a proposal and ask for approval.
 Nothing runs first. Pending proposals survive restarts and expire on a timer.
+
+Mitra learns its own manual from the `knowledge/` pack plus the repo docs.
+Seed any project (run once per project):
+
+```sh
+python -m mitra.seed -p Mitra --docs
+```
+
+Reruns add only what is new, so seeding never duplicates records.
 
 ## Project layout
 
@@ -199,8 +219,9 @@ Mitra/
     tools/  base  registry  file_tools  safe_tools  shell_tool
       github_tools  macos_tools  mcp_tools
     security/  policy  audit
-    planning  mcp  stt  autostart
+    planning  mcp  stt  autostart  seed
     web/  HUD plus avatar and profile served at the root URL
+  knowledge/  seed pack for project memory
   scripts/macos/  login install, launcher, app builder, opener
   desktop/  Tauri shell with dev hook that boots the API
   tests/
@@ -208,6 +229,7 @@ Mitra/
 
 ## Docs
 
+* [User guide](docs/USER_GUIDE.md)
 * [Product brief](docs/PRODUCT_BRIEF.md)
 * [Architecture](docs/ARCHITECTURE.md)
 * [Decisions](docs/DECISIONS.md)

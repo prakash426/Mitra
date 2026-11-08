@@ -11,7 +11,7 @@ import json
 import re
 import shlex
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .config import MitraConfig, ShellConfig, default_config
@@ -48,6 +48,7 @@ from .mcp import (
 )
 from .tools.file_tools import execute_approved_write
 from .tools.github_tools import execute_approved_pr
+from .tools.macos_tools import execute_approved_event
 from .tools.mcp_tools import (
     McpTool,
     read_via_pool_or_spawn,
@@ -119,6 +120,20 @@ def _topic_hint(text: str) -> str:
         if len(cleaned) >= 4 and cleaned.lower() not in _TOPIC_STOPWORDS:
             return cleaned
     return ""
+
+
+def _parse_day(text: str) -> "date | None":
+    try:
+        return datetime.strptime(text.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _stamp_day(stamp: str) -> "date | None":
+    try:
+        return datetime.fromisoformat(stamp).date()
+    except ValueError:
+        return None
 
 
 def _kind_for_fact(text: str) -> str:
@@ -257,6 +272,11 @@ def _parse(message: str) -> _Intent:
     match = re.match(r"(?is)^\s*remember to\s+(.+)$", text)
     if match:
         return _Intent(kind="task_add", arg=match.group(1).strip())
+    match = re.match(
+        r"(?is)^\s*remember\s+(?:this\s+|that\s+|the\s+)?page\s+(\S+)\s*$", text
+    )
+    if match:
+        return _Intent(kind="remember_page", arg=match.group(1).strip())
     match = re.match(r"(?is)^\s*(?:todo|task|add task)\s*:\s*(.+)$", text)
     if match:
         return _Intent(kind="task_add", arg=match.group(1).strip())
@@ -292,6 +312,16 @@ def _parse(message: str) -> _Intent:
     match = re.match(r"(?is)^\s*start\s+(?:task\s+)?(\d+)\s*$", text)
     if match:
         return _Intent(kind="task_start", arg=match.group(1))
+    match = re.match(r"(?is)^\s*due\s+(\d+)\s+(\S+)\s*$", text)
+    if match:
+        return _Intent(
+            kind="task_due", arg=match.group(1), arg2=match.group(2).strip()
+        )
+    if re.match(r"(?is)^\s*standup\s*$", text):
+        return _Intent(kind="standup")
+    match = re.match(r"(?is)^\s*export\s+(notes|memories|memory)\s*$", text)
+    if match:
+        return _Intent(kind="export_notes")
     if "show me" in lowered and any(
         word in lowered for word in ("saved", "memor", "important", "project")
     ):
@@ -411,6 +441,23 @@ def _parse(message: str) -> _Intent:
             arg2=match.group(2).strip(),
             arg3=(match.group(3) or "").strip(),
         )
+    match = re.match(
+        r"(?is)^\s*addevent\s+(.+?)\s+on\s+(\d{4}-\d{2}-\d{2})"
+        r"\s+at\s+(\d{1,2}:\d{2})(?:\s+for\s+(\d+))?\s*$",
+        text,
+    )
+    if match:
+        hour, minute = match.group(3).strip().split(":")
+        return _Intent(
+            kind="calendar_add",
+            arg=match.group(1).strip(),
+            arg2=match.group(2).strip(),
+            arg3="%02d:%02d" % (int(hour), int(minute)),
+            arg4=(match.group(4) or "").strip(),
+        )
+    if re.match(r"(?is)^\s*addevent\b", text):
+        return _Intent(kind="calendar_add_help")
+
     if any(
         marker in lowered
         for marker in (
@@ -438,6 +485,11 @@ def _parse(message: str) -> _Intent:
         )
     ):
         return _Intent(kind="mail_recent")
+
+    if re.match(r"(?is)^\s*how\s+(do|can|to)\b", text) or re.match(
+        r"(?is)^\s*what\s+is\s+the\s+command\b", text
+    ):
+        return _Intent(kind="howto", arg=text)
 
     if re.search(r"(?is)\bread\b", text):
         return _Intent(kind="read_file", arg=text)
@@ -536,6 +588,7 @@ class Orchestrator:
             return response
         handler = {
             "remember": self._remember,
+            "remember_page": self._remember_page,
             "correction": self._correction,
             "recall": self._recall,
             "list_memories": self._list_memories,
@@ -543,7 +596,12 @@ class Orchestrator:
             "task_list": self._task_list,
             "task_done": self._task_done,
             "task_start": self._task_start,
+            "task_due": self._task_due,
+            "standup": self._standup,
+            "export_notes": self._export_notes,
             "standing_add": self._standing_add,
+            "calendar_add": self._calendar_add,
+            "calendar_add_help": self._calendar_add_help,
             "read_file": self._read_file,
             "list_dir": self._list_dir,
             "search_files": self._search_files,
@@ -572,6 +630,7 @@ class Orchestrator:
             "mcp_resources": self._mcp_resources,
             "mcp_resource": self._mcp_resource,
             "help": self._help,
+            "howto": self._howto,
             "chat": self._chat,
         }.get(intent.kind, self._chat)
         draft, actions, approval, evidence = handler(ctx, intent)
@@ -748,6 +807,38 @@ class Orchestrator:
                 record.text,
             )
         return draft, actions, None, _evidence_from_records(records)
+
+    def _remember_page(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("fetch_url")
+        assert tool is not None
+        result = tool.invoke({"url": intent.arg}, ctx)
+        if not result.ok:
+            return (
+                "I could not fetch that page: %s" % result.error,
+                ["remember_page:error"],
+                None,
+                [],
+            )
+        snippet = result.output.strip()[:800]
+        text = "Page %s: %s" % (intent.arg[:160], snippet or "(no readable text)")
+        try:
+            record = self.memory.add(ctx.project, "note", text, source=intent.arg[:160])
+        except ValueError as exc:
+            return "I could not save that page: %s" % exc, [], None, []
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="memory_add",
+            target="memory:%d" % record.id,
+            decision="allowed",
+            rationale="Page saved to memory.",
+            result=record.text[:120],
+        )
+        self._embed_best_effort(record)
+        draft = "Saved that page to %s as note %d." % (ctx.project, record.id)
+        return draft, ["memory_add:%d" % record.id], None, _evidence_from_records([record])
 
     def _correction(
         self, ctx: ToolContext, intent: _Intent
@@ -943,7 +1034,15 @@ class Orchestrator:
                 decision="denied",
                 rationale="User denied proposal %s. Nothing ran." % proposal.id,
             )
-            prefix = "run_denied:" if proposal.action == "run_shell" else "write_denied:"
+            deny_tags = {
+                "run_shell": "run_denied:",
+                "github_open_pr": "pr_denied:",
+                "calendar_add": "event_denied:",
+                "memory_import": "import_denied:",
+                "cross_project": "synthesis_denied:",
+                "mcp_call": "mcp_denied:",
+            }
+            prefix = deny_tags.get(proposal.action, "write_denied:")
             return (
                 True,
                 "Discarded proposal %s. Nothing was written or run." % proposal.id,
@@ -983,6 +1082,15 @@ class Orchestrator:
                     "pr_execute:error",
                 )
             return True, "Approved. %s" % result.output, "pr_executed:" + proposal.id
+        if proposal.action == "calendar_add":
+            result = execute_approved_event(proposal.id, token, ctx)
+            if not result.ok:
+                return (
+                    False,
+                    "Approved, but Calendar failed: %s" % result.error,
+                    "event_execute:error",
+                )
+            return True, "Approved. %s" % result.output, "event_executed:" + proposal.id
         if proposal.action == "memory_import":
             return self._execute_import(ctx, proposal, token)
         if proposal.action == "cross_project":
@@ -1103,6 +1211,13 @@ class Orchestrator:
         draft = "Task %d tracked for %s: %s" % (task.id, ctx.project, task.title)
         return draft, ["task_add:%d" % task.id], None, []
 
+    @staticmethod
+    def _task_line(task) -> str:
+        line = "%d. [%s] %s" % (task.id, task.state, task.title)
+        if task.due_date:
+            line += " (due %s)" % task.due_date
+        return line
+
     def _task_list(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
@@ -1114,9 +1229,129 @@ class Orchestrator:
                 None,
                 [],
             )
-        lines = ["%d. [%s] %s" % (t.id, t.state, t.title) for t in tasks]
+        lines = [self._task_line(t) for t in tasks]
         draft = "Tasks for %s:\n%s" % (ctx.project, "\n".join(lines))
         return draft, ["task_list:%d" % len(tasks)], None, []
+
+    def _task_due(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        try:
+            task_id = int(intent.arg)
+        except ValueError:
+            return "Task '%s' is not a number." % intent.arg, [], None, []
+        task = self.memory.task_get(task_id)
+        if task is None or task.project != ctx.project:
+            return "I have no task %d in %s." % (task_id, ctx.project), [], None, []
+        if intent.arg2.lower() in ("clear", "none", "nodate"):
+            updated = self.memory.task_set_due(task_id, "")
+            assert updated is not None
+            draft = "Cleared the due date on task %d." % task_id
+        else:
+            try:
+                updated = self.memory.task_set_due(task_id, intent.arg2)
+            except ValueError:
+                return (
+                    "Use a date like 2026-11-10: due %d 2026-11-10." % task_id,
+                    [],
+                    None,
+                    [],
+                )
+            assert updated is not None
+            draft = "Task %d is now due %s." % (task_id, updated.due_date)
+        self.audit.log(
+            actor="user",
+            project=ctx.project,
+            action="task_due",
+            target="task:%d" % task_id,
+            decision="allowed",
+            rationale=draft,
+            result=updated.title[:120],
+        )
+        return draft, ["task_due:%d" % task_id], None, []
+
+    def _standup(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        today = datetime.now(timezone.utc).date()
+        tasks = self.memory.task_list(ctx.project)
+        done_recent = [
+            t for t in tasks
+            if t.state == "done" and _stamp_day(t.updated_at) in (today, date.fromordinal(today.toordinal() - 1))
+        ]
+        doing = [t for t in tasks if t.state == "doing"]
+        queued = [t for t in tasks if t.state == "open"]
+        try:
+            pending = self.gate.pending(ctx.project)
+        except Exception:
+            pending = []
+        sections = []
+        if done_recent:
+            sections.append("Done:\n%s" % "\n".join("- " + t.title[:100] for t in done_recent))
+        else:
+            sections.append("Done: nothing finished in the last day.")
+        current = doing + queued[:3]
+        if current:
+            sections.append("Now:\n%s" % "\n".join("- " + self._task_line(t)[:110] for t in current))
+        else:
+            sections.append("Now: no open work. Add one with todo: ...")
+        blocks = []
+        for item in pending[:5]:
+            blocks.append("- %s %s" % (item.id, item.action))
+        overdue = [
+            t for t in tasks
+            if t.state != "done" and t.due_date and (_parse_day(t.due_date) or today) < today
+        ]
+        for task in overdue[:5]:
+            blocks.append("- task #%d overdue since %s" % (task.id, task.due_date))
+        sections.append("Blocked:\n%s" % "\n".join(blocks) if blocks else "Blocked: nothing waiting.")
+        draft = "Standup for %s:\n\n%s" % (ctx.project, "\n\n".join(sections))
+        return draft, ["standup:ok"], None, []
+
+    def _export_notes(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        records = self.memory.list_project(ctx.project, limit=200)
+        tasks = self.memory.task_list(ctx.project)
+        if not records and not tasks:
+            return (
+                "Nothing to export for %s yet." % ctx.project,
+                ["export:empty"],
+                None,
+                [],
+            )
+        lines = ["# %s notes" % ctx.project, ""]
+        if records:
+            lines.append("## Memories")
+            for record in records:
+                lines.append("- [%s] %s (src %s, %s)" % (
+                    record.kind, record.text, record.source, record.updated_at))
+            lines.append("")
+        if tasks:
+            lines.append("## Tasks")
+            for task in tasks:
+                lines.append("- %s" % self._task_line(task))
+            lines.append("")
+        content = "\n".join(lines)
+        safe = "".join(ch if ch.isalnum() else "-" for ch in ctx.project).strip("-") or "notes"
+        tool = self.registry.get("propose_write_file")
+        assert tool is not None
+        result = tool.invoke({"path": "%s-notes.md" % safe[:40], "content": content}, ctx)
+        if not result.ok:
+            return "I could not stage that export: %s" % result.error, ["export:error"], None, []
+        preview = content if len(content) <= 300 else content[:300] + "..."
+        draft = (
+            "I staged a notes export for your approval:\nTarget: %s\nProposal: %s\n"
+            "Reply 'approve %s' to write, or 'deny %s' to discard."
+            % (result.target, result.proposal_id, result.proposal_id, result.proposal_id)
+        )
+        approval = ApprovalRequest(
+            action="write_file",
+            target=result.target,
+            proposal_id=result.proposal_id,
+            preview=preview,
+        )
+        return draft, ["export_proposed:%s" % result.proposal_id], approval, []
 
     def _task_transition(
         self, ctx: ToolContext, task_id_text: str, state: str
@@ -1412,6 +1647,57 @@ class Orchestrator:
             )
         return result.output, ["mail:ok"], None, []
 
+    def _calendar_add(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        tool = self.registry.get("calendar_add")
+        assert tool is not None
+        args: dict[str, object] = {
+            "title": intent.arg,
+            "date": intent.arg2,
+            "time": intent.arg3,
+        }
+        if intent.arg4:
+            args["duration"] = intent.arg4
+        result = tool.invoke(args, ctx)
+        if not result.ok:
+            return (
+                "I could not stage that event: %s" % result.error,
+                ["event_propose:error"],
+                None,
+                [],
+            )
+        preview = result.target
+        draft = (
+            "I staged this event for your approval:\n%s\nProposal: %s\n"
+            "Reply 'approve %s' to book, or 'deny %s' to discard."
+            % (
+                result.target,
+                result.proposal_id,
+                result.proposal_id,
+                result.proposal_id,
+            )
+        )
+        approval = ApprovalRequest(
+            action="calendar_add",
+            target=result.target,
+            proposal_id=result.proposal_id,
+            preview=preview,
+        )
+        return draft, ["event_proposed:%s" % result.proposal_id], approval, []
+
+    def _calendar_add_help(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        return (
+            "Book an event like this: addevent Team lunch on 2026-11-10 "
+            "at 12:30 for 45. Date is YYYY-MM-DD, time is HH:MM, minutes "
+            "are optional. I stage it first; you approve before anything books.",
+            [],
+            None,
+            [],
+        )
+
     def _pending(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
@@ -1449,16 +1735,21 @@ class Orchestrator:
             "pending : list open proposals\n"
             "todo: <item> : track a task, 'done <id>' finishes it\n"
             "tasks : list tracked tasks\n"
+            "due <id> <YYYY-MM-DD> : set a due date, 'clear' removes it\n"
+            "standup : done, now, and blocked in one view\n"
+            "export notes : stage a markdown backup for approval\n"
             "standing: <rule> : save an always on instruction\n"
             "list [dir] : list a directory in scope\n"
             "search <pattern> : find files by name\n"
             "fetch <url> : fetch a page as text\n"
+            "remember page <url> : fetch a page and save it as a note\n"
             "run <command> : stage an allowlisted shell command\n"
             "import memories from <file> : preview and stage an import\n"
             "github read <repo> <path> : read a repo file\n"
             "github prs <repo> : list pull requests\n"
             "github open pr <repo> from <head> to <base> titled <title>\n"
             "calendar : upcoming events\n"
+            "addevent <title> on <YYYY-MM-DD> at <HH:MM> : book, with approval\n"
             "check mail : recent inbox subjects\n"
             "<do X and then Y> : model planned multi step task\n"
             "continue <plan-id> / abandon <plan-id> : resume or drop a plan\n"
@@ -1473,6 +1764,60 @@ class Orchestrator:
             % (ctx.project, "\n".join(tool_lines))
         )
         return draft, [], None, []
+
+    def _howto(
+        self, ctx: ToolContext, intent: _Intent
+    ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
+        """Exact command syntax for how to questions. No guessing."""
+        lowered = intent.arg.lower()
+        guides: list[tuple[tuple[str, ...], str]] = [
+            (("calendar", "schedule", "meeting", "event", "addevent", "book"),
+             "Say: what is on my calendar in the next 7 days? "
+             "Book with: addevent <title> on 2026-11-10 at 12:30."),
+            (("mail", "inbox", "email"),
+             "Say: check my inbox."),
+            (("remember", "recall", "memory", "memories", "forget"),
+             "Say: remember that <fact>. Then ask: what did we decide about <topic>?"),
+            (("task", "todo"),
+             "Say: todo: <item>. List with: tasks. Finish with: done <id>."),
+            (("standing", "instruction", "prefer"),
+             "Say: standing: <rule>. I apply it in every chat here."),
+            (("write", "save", "update", "edit"),
+             "Say: save <content> to <path>. I stage it, then you approve."),
+            (("read", "file", "list", "search", "find"),
+             "Say: read <path>, or: list, or: search <pattern>."),
+            (("run", "shell", "command", "exec"),
+             "Say: run <command>. Allowlisted commands only, approval first."),
+            (("github", "pr ", "pull request", "repo"),
+             "Say: github read <repo> <path>, or: github prs <repo>."),
+            (("plan", "workflow", "automate"),
+             "Describe steps with then, for example: list notes and then read the README. "
+             "Save repeats with: save plan-N as <name>."),
+            (("mcp", "server", "integration"),
+             "Say: mcp <server> <tool>, or: mcp resources <server>."),
+            (("export", "backup"),
+             "Say: export notes. I stage a markdown file for approval."),
+            (("standup", "status update"),
+             "Say: standup. Done, now, and blocked in one view."),
+            (("due", "deadline", "overdue"),
+             "Say: due <id> 2026-11-10. Clear with: due <id> clear."),
+            (("page", "article", "link"),
+             "Say: remember page <url>. I fetch and save it as a note."),
+            (("import",),
+             "Say: import memories from <file>. I preview before importing."),
+            (("approv", "pending", "deny"),
+             "Say: pending. Then: approve <id>, or: deny <id>."),
+        ]
+        for keywords, guide in guides:
+            if any(word in lowered for word in keywords):
+                return guide, ["howto:ok"], None, []
+        return (
+            "Tell me which area: memory, tasks, files, shell, github, "
+            "calendar, mail, plans, or approvals. Or type help for all commands.",
+            ["howto:ask"],
+            None,
+            [],
+        )
 
     def _plan_message(self, ctx: ToolContext, message: str) -> OrchestratorResponse:
         """Planning intercept. Any planning failure falls back to chat."""
@@ -2260,6 +2605,31 @@ class Orchestrator:
                 "%d approval%s waiting. Say pending to review." % (len(pending), "" if len(pending) == 1 else "s")
             )
         unfinished = list(doing_tasks) + list(open_tasks)
+        today = datetime.now(timezone.utc).date()
+        overdue = [
+            t for t in unfinished
+            if t.due_date and (_parse_day(t.due_date) or today) < today
+        ]
+        due_today = [t for t in unfinished if t.due_date == today.isoformat()]
+        if overdue:
+            suggestions.append(
+                "Overdue: task #%d %s (due %s)." % (
+                    overdue[0].id, overdue[0].title[:70], overdue[0].due_date)
+            )
+        if due_today:
+            suggestions.append(
+                "Due today: task #%d %s." % (due_today[0].id, due_today[0].title[:70])
+            )
+        stale = []
+        for task in open_tasks:
+            created = _stamp_day(task.created_at)
+            if created is not None and (today - created).days >= 7:
+                stale.append(task)
+        if stale:
+            suggestions.append(
+                "Task #%d has been open %d days. Still needed?" % (
+                    stale[0].id, (today - (_stamp_day(stale[0].created_at) or today)).days)
+            )
         if unfinished:
             suggestions.append(
                 "Continue %s: %s." % ("task %d" % unfinished[0].id, unfinished[0].title[:90])
@@ -2292,7 +2662,7 @@ class Orchestrator:
             "web": ["fetch_url"],
             "shell": ["run_shell"],
             "github": ["github_read_file", "github_list_prs", "github_open_pr"],
-            "macos": ["calendar_next", "mail_recent"],
+            "macos": ["calendar_next", "mail_recent", "calendar_add"],
         }
         labels = {
             "files": "Files in scope",
@@ -2332,6 +2702,92 @@ class Orchestrator:
                 }
             )
         return cards
+
+    def morning_scan(self, project: str) -> dict[str, object]:
+        """One shot morning routine: calendar today, fresh mail, open work.
+
+        Read only throughout, so it never stages approvals. Each source
+        degrades independently; one failure never blanks the whole scan.
+        """
+        key = project.strip() or "default"
+        ctx = ToolContext(
+            project=key,
+            policy=self.policy,
+            gate=self.gate,
+            audit=self.audit,
+            shell=self.policy.shell or self.config.shell,
+            fetch_allowed_hosts=self.config.tools.fetch_allowed_hosts,
+            fetch_private_hosts=self.config.tools.fetch_private_hosts,
+            mcp_servers=self.config.mcp_servers,
+            mcp_pool=self.mcp_pool,
+        )
+        parts: list[str] = []
+        calendar = self.registry.get("calendar_next")
+        if calendar is not None:
+            result = calendar.invoke({"days": 1}, ctx)
+            parts.append(
+                "Today:\n%s" % result.output if result.ok
+                else "Today: calendar unavailable (%s)." % result.error
+            )
+        mail = self.registry.get("mail_recent")
+        if mail is not None:
+            result = mail.invoke({"limit": 5}, ctx)
+            parts.append(
+                "Inbox:\n%s" % result.output if result.ok
+                else "Inbox: mail unavailable (%s)." % result.error
+            )
+        try:
+            open_tasks = self.memory.task_list(key, state="open")
+            doing_tasks = self.memory.task_list(key, state="doing")
+        except Exception:
+            open_tasks = []
+            doing_tasks = []
+        unfinished = list(doing_tasks) + list(open_tasks)
+        if unfinished:
+            lines = []
+            for task in unfinished[:5]:
+                entry = "#%d [%s] %s" % (task.id, task.state, task.title[:100])
+                if task.due_date:
+                    entry += " (due %s)" % task.due_date
+                lines.append(entry)
+            parts.append("Open work:\n%s" % "\n".join(lines))
+            first = unfinished[0]
+            parts.append("First move: task #%d, %s." % (first.id, first.title[:100]))
+        else:
+            parts.append("Open work: none tracked. Add one with todo: ...")
+        watch = list(self.config.github.watch_repos)[:5]
+        if watch:
+            pr_tool = self.registry.get("github_list_prs")
+            if pr_tool is not None:
+                pr_lines = []
+                for repo in watch:
+                    result = pr_tool.invoke({"repo": repo, "state": "open"}, ctx)
+                    if not result.ok:
+                        pr_lines.append("%s: %s" % (repo, result.error[:100]))
+                        continue
+                    rows = result.output.splitlines()[1:4]
+                    if rows:
+                        pr_lines.append("%s:\n  %s" % (repo, "\n  ".join(rows)))
+                    else:
+                        pr_lines.append("%s: no open PRs." % repo)
+                parts.append("Watched repos:\n%s" % "\n".join(pr_lines))
+        try:
+            pending = self.gate.pending(key)
+        except Exception:
+            pending = []
+        if pending:
+            parts.append("%d approval%s still waiting. Say pending to review." % (
+                len(pending), "" if len(pending) == 1 else "s"))
+        self.audit.log(
+            actor="user",
+            project=key,
+            action="morning_scan",
+            target="briefing",
+            decision="allowed",
+            rationale="Read only morning routine.",
+            result="%d sections" % len(parts),
+        )
+        return {"text": "\n\n".join(parts), "tasks_open": len(unfinished)}
 
 
 def build_orchestrator(

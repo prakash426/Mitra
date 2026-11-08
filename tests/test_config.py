@@ -190,3 +190,14 @@ def test_embeddings_section(tmp_path):
     )
     with pytest.raises(ConfigError, match="Unknown embeddings"):
         load_config(_write(tmp_path, bad))
+
+
+def test_github_watch_section(tmp_path):
+    config = load_config(_write(tmp_path))
+    assert config.github.watch_repos == ()
+    custom = VALID_TOML + '\n[github]\nwatch_repos = ["octo/demo"]\n'
+    config2 = load_config(_write(tmp_path, custom))
+    assert config2.github.watch_repos == ("octo/demo",)
+    bad = VALID_TOML + '\n[github]\nwatch_repos = ["nope"]\n'
+    with pytest.raises(ConfigError, match="owner/name"):
+        load_config(_write(tmp_path, bad))

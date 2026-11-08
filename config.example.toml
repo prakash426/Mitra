@@ -82,6 +82,11 @@ max_mb = 10
 # args = ["/path/to/notes_mcp.py"]
 # trust = "staged"
 
+[github]
+# Repos whose open PRs appear in the morning scan (max five).
+# Public repos need no token; private ones need MITRA_GITHUB_TOKEN.
+watch_repos = []
+
 # Per project profiles. Each section overrides base settings for that project.
 # Supported keys: provider, model, allowed_dirs, shell_enabled.
 [profiles.CancerLens]

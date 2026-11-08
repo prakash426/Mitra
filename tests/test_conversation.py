@@ -55,3 +55,39 @@ def test_briefing_recalls_last_session(orch):
     assert "Atlas" in briefing["greeting"] or "Atlas" in briefing["recap"]
     assert briefing["tasks_open"] >= 1
     assert briefing["suggestions"]
+
+
+def test_howto_gives_exact_commands(orch):
+    assert "todo:" in orch.handle_message("P", "How do I track a task?").text
+    assert "github read" in orch.handle_message("P", "How can I use github?").text
+    assert "save <content>" in orch.handle_message("P", "How to save a file?").text
+    fallback = orch.handle_message("P", "How do I?")
+    assert "help" in fallback.text
+
+
+def test_morning_scan_combines_sources(orch, monkeypatch):
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.shutil.which", lambda n: "/usr/bin/osascript"
+    )
+
+    class Done:
+        stdout = "Standup | Monday\n"
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.subprocess.run", lambda *a, **k: Done()
+    )
+    orch.handle_message("P", "todo: Ship the demo.")
+    scan = orch.morning_scan("P")
+    assert "Standup" in scan["text"]
+    assert "Ship the demo" in scan["text"]
+    assert "First move" in scan["text"]
+    assert scan["tasks_open"] == 1
+
+
+def test_morning_scan_degrades_gracefully(orch, monkeypatch):
+    monkeypatch.setattr("mitra.tools.macos_tools.shutil.which", lambda n: None)
+    scan = orch.morning_scan("P")
+    assert "unavailable" in scan["text"]
+    assert "Open work" in scan["text"]

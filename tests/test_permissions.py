@@ -15,6 +15,18 @@ def policy(tmp_path):
     return Policy([tmp_path / "proj"])
 
 
+def test_calendar_add_needs_approval(policy):
+    decision = policy.check_calendar_add("Dentist", "2026-11-11", "09:00")
+    assert decision.needs_approval and not decision.allowed
+
+
+def test_calendar_add_denies_bad_shapes(policy):
+    assert not policy.check_calendar_add("", "2026-11-11", "09:00").needs_approval
+    assert not policy.check_calendar_add("x", "11-11", "09:00").needs_approval
+    assert not policy.check_calendar_add("x", "2026-11-11", "9am").needs_approval
+    assert not policy.check_calendar_add("x" * 201, "2026-11-11", "09:00").needs_approval
+
+
 def test_read_allowed_inside(policy, tmp_path):
     decision = policy.check_read(tmp_path / "proj" / "a.txt")
     assert decision.allowed and not decision.needs_approval

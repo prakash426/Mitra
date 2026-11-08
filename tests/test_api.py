@@ -171,3 +171,12 @@ def test_autostart_status_endpoint(orch, tmp_path, monkeypatch):
     body = client.get("/autostart").json()
     assert body["supported"] is True
     assert body["enabled"] is False
+
+
+def test_morning_endpoint(orch, monkeypatch):
+    monkeypatch.setattr("mitra.tools.macos_tools.shutil.which", lambda n: None)
+    client = TestClient(build_app(orch))
+    orch.handle_message("P", "todo: Ship it.")
+    body = client.get("/morning", params={"project": "P"}).json()
+    assert "Ship it" in body["text"]
+    assert body["tasks_open"] == 1

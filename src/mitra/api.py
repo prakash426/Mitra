@@ -95,6 +95,7 @@ class TaskOut(BaseModel):
     title: str
     state: str
     updated_at: str
+    due_date: str = ""
 
 
 class SttOut(BaseModel):
@@ -133,6 +134,11 @@ class ConnectorOut(BaseModel):
     tools: list[str] = []
     enabled: bool = True
     hint: str = ""
+
+
+class MorningOut(BaseModel):
+    text: str = ""
+    tasks_open: int = 0
 
 
 class VoiceOut(BaseModel):
@@ -260,6 +266,7 @@ def build_app(
                 title=t.title,
                 state=t.state,
                 updated_at=t.updated_at,
+                due_date=t.due_date,
             )
             for t in items
         ]
@@ -364,6 +371,15 @@ def build_app(
             pending_count=int(data.get("pending_count", 0)),  # type: ignore[arg-type]
             memory_count=int(data.get("memory_count", 0)),  # type: ignore[arg-type]
             suggestions=[str(item) for item in data.get("suggestions", [])],  # type: ignore[union-attr]
+        )
+
+    @app.get("/morning", response_model=MorningOut)
+    def morning(project: str = "default") -> MorningOut:
+        active = current_for(project)
+        data = active.morning_scan(project)
+        return MorningOut(
+            text=str(data.get("text", "")),
+            tasks_open=int(data.get("tasks_open", 0)),  # type: ignore[arg-type]
         )
 
     @app.get("/connectors", response_model=list[ConnectorOut])

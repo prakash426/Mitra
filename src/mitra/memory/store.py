@@ -51,6 +51,7 @@ class Task:
     source: str
     created_at: str
     updated_at: str
+    due_date: str = ""
 
 
 def _utcnow() -> str:
@@ -121,6 +122,13 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_project
                 ON tasks(project, state, updated_at DESC);
+            """
+        )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(tasks)")}
+        if "due_date" not in columns:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN due_date TEXT NOT NULL DEFAULT ''")
+        self._conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS chat_turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -294,6 +302,7 @@ class MemoryStore:
         return hits
 
     def _row_to_task(self, row: sqlite3.Row) -> Task:
+        keys = row.keys()
         return Task(
             id=row["id"],
             project=row["project"],
@@ -302,6 +311,7 @@ class MemoryStore:
             source=row["source"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            due_date=row["due_date"] if "due_date" in keys else "",
         )
 
     def task_add(self, project: str, title: str, source: str = "user") -> Task:
@@ -353,6 +363,21 @@ class MemoryStore:
         self._conn.execute(
             "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
             (state, _utcnow(), task_id),
+        )
+        self._conn.commit()
+        return self.task_get(task_id)
+
+    def task_set_due(self, task_id: int, due_date: str) -> Task | None:
+        """Set or clear a due date (YYYY-MM-DD, empty clears)."""
+        cleaned = due_date.strip()
+        if cleaned:
+            try:
+                datetime.strptime(cleaned, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError("due date must look like YYYY-MM-DD.")
+        self._conn.execute(
+            "UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ?",
+            (cleaned, _utcnow(), task_id),
         )
         self._conn.commit()
         return self.task_get(task_id)

@@ -481,7 +481,7 @@ async function refreshTasks() {
       st.textContent = "[" + t.state.toUpperCase() + "]";
       const title = document.createElement("span");
       title.className = "ttitle";
-      title.textContent = "#" + t.id + " " + t.title;
+      title.textContent = "#" + t.id + " " + t.title + (t.due_date ? " (due " + t.due_date + ")" : "");
       li.appendChild(st);
       li.appendChild(title);
       if (t.state !== "done") {
@@ -698,6 +698,24 @@ async function refreshBriefing() {
       });
       box.appendChild(btn);
     });
+    const scanBtn = document.createElement("button");
+    scanBtn.type = "button";
+    scanBtn.className = "scan";
+    scanBtn.textContent = "RUN MORNING SCAN";
+    scanBtn.addEventListener("click", async () => {
+      scanBtn.disabled = true;
+      scanBtn.textContent = "SCANNING";
+      try {
+        const scan = await api("/morning?project=" + encodeURIComponent(state.project));
+        addMitra(scan.text);
+      } catch (err) {
+        addMsg("sys", "Morning scan failed: " + err.message);
+      } finally {
+        scanBtn.disabled = false;
+        scanBtn.textContent = "RUN MORNING SCAN";
+      }
+    });
+    box.appendChild(scanBtn);
     return data;
   } catch (err) {
     return null;

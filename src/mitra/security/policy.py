@@ -345,3 +345,17 @@ class Policy:
                     "Path arguments must stay inside the working directory."
                 )
         return Decision.approval("Shell commands need explicit approval.")
+
+    def check_calendar_add(self, title: str, date: str, time: str) -> Decision:
+        """Calendar writes need approval. Bad shapes are denied first."""
+        if not title.strip():
+            return Decision.deny("Event title must be a non empty string.")
+        if len(title) > 200:
+            return Decision.deny("Event title must stay under 200 characters.")
+        try:
+            datetime.strptime(date.strip(), "%Y-%m-%d")
+        except ValueError:
+            return Decision.deny("Event date must look like YYYY-MM-DD.")
+        if not re.fullmatch(r"[01]\d:[0-5]\d|2[0-3]:[0-5]\d", time.strip()):
+            return Decision.deny("Event time must look like HH:MM.")
+        return Decision.approval("Calendar writes need explicit approval.")

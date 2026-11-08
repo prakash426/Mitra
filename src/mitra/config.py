@@ -110,6 +110,11 @@ class McpServerConfig:
 
 
 @dataclass(frozen=True)
+class GithubConfig:
+    watch_repos: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class MitraConfig:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -120,6 +125,7 @@ class MitraConfig:
     speech: SpeechConfig = field(default_factory=SpeechConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     speech_to_text: SpeechToTextConfig = field(default_factory=SpeechToTextConfig)
+    github: GithubConfig = field(default_factory=GithubConfig)
     mcp_servers: dict[str, McpServerConfig] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_dir: Path = field(default_factory=Path.cwd)
@@ -442,6 +448,20 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
 
     mcp_servers = _mcp_servers(raw.get("mcp", {}))
 
+    github_raw = raw.get("github", {})
+    if not isinstance(github_raw, dict):
+        raise ConfigError("[github] must be a settings table.")
+    watch = github_raw.get("watch_repos", [])
+    if not isinstance(watch, list):
+        raise ConfigError("github.watch_repos must be a list.")
+    for entry in watch:
+        if not isinstance(entry, str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", entry.strip()
+        ):
+            raise ConfigError(
+                "github.watch_repos entries must look like 'owner/name'."
+            )
+
     return MitraConfig(
         provider=ProviderConfig(
             name=name,
@@ -471,6 +491,7 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
         speech_to_text=SpeechToTextConfig(
             engine=stt_engine, model=stt_model.strip(), max_mb=stt_max
         ),
+        github=GithubConfig(watch_repos=tuple(w.strip() for w in watch)),
         mcp_servers=mcp_servers,
         profiles=_profile_overrides(raw.get("profiles", {})),
         project_dir=cfg_path.parent,

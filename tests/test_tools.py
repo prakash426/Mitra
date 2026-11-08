@@ -51,6 +51,7 @@ def test_default_registry_has_m4_tools():
         "github_open_pr",
         "calendar_next",
         "mail_recent",
+        "calendar_add",
     }
 
 

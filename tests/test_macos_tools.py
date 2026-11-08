@@ -7,7 +7,12 @@ import subprocess
 from mitra.security.audit import AuditLog
 from mitra.security.policy import ApprovalGate, Policy
 from mitra.tools.base import ToolContext
-from mitra.tools.macos_tools import CalendarNextTool, MailRecentTool
+from mitra.tools.macos_tools import (
+    CalendarAddTool,
+    CalendarNextTool,
+    MailRecentTool,
+    execute_approved_event,
+)
 
 
 def _ctx(tmp_path):
@@ -114,6 +119,49 @@ def test_mail_success(monkeypatch, tmp_path):
         result = MailRecentTool().invoke({"limit": 5}, ctx)
         assert result.ok and "Ship it" in result.output
         assert not MailRecentTool().invoke({"limit": 99}, ctx).ok
+    finally:
+        gate.close()
+        audit.close()
+
+
+def test_calendar_add_stages_and_books(monkeypatch, tmp_path):
+    ctx, gate, audit = _ctx(tmp_path)
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.shutil.which", lambda n: "/usr/bin/osascript"
+    )
+    seen = []
+    monkeypatch.setattr(
+        "mitra.tools.macos_tools.subprocess.run",
+        lambda *a, **k: (seen.append(a), _Done(""))[1],
+    )
+    try:
+        staged = CalendarAddTool().invoke(
+            {"title": "Dentist", "date": "2026-11-11", "time": "09:00"}, ctx
+        )
+        assert staged.ok and staged.proposal_id
+        assert seen == []
+        token = gate.approve(staged.proposal_id)
+        done = execute_approved_event(staged.proposal_id, token, ctx)
+        assert done.ok
+        assert "Booked" in done.output
+        assert "Dentist" in seen[0][0][2]
+        actions = {e.action for e in audit.list_recent("P")}
+        assert "calendar_add" in actions
+    finally:
+        gate.close()
+        audit.close()
+
+
+def test_calendar_add_denials(tmp_path):
+    ctx, gate, audit = _ctx(tmp_path)
+    try:
+        assert not CalendarAddTool().invoke({"title": "", "date": "2026-11-11", "time": "09:00"}, ctx).ok
+        assert not CalendarAddTool().invoke({"title": "x", "date": "11-11", "time": "09:00"}, ctx).ok
+        assert not CalendarAddTool().invoke({"title": "x", "date": "2026-11-11", "time": "9am"}, ctx).ok
+        assert not CalendarAddTool().invoke(
+            {"title": "x", "date": "2026-11-11", "time": "09:00", "duration": 9999}, ctx
+        ).ok
+        assert gate.pending("P") == []
     finally:
         gate.close()
         audit.close()

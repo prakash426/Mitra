@@ -101,7 +101,7 @@ Rules:
 Files: `src/mitra/tools/`
 
 `Tool` defines name, description, read only flag, and an `invoke` contract.
-`ToolRegistry` holds registration and discovery. Eleven built in tools ship,
+`ToolRegistry` holds registration and discovery. Twelve built in tools ship,
 plus dynamic MCP tools per configured server:
 
 * `read_file`: read only, confined to configured allowed directories.
@@ -119,6 +119,9 @@ plus dynamic MCP tools per configured server:
 * `github_open_pr`: stages a PR proposal, never posts directly.
 * `calendar_next`, `mail_recent`: read only macOS Calendar and Mail
   lookups through generated AppleScript.
+* `calendar_add`: stages an event proposal through policy date and time
+  checks, never books directly. Approval executes one generated
+  AppleScript against the first calendar.
 * `mcp__<server>__<tool>`: third party MCP tools, discovered at startup
   from `[mcp.servers]`. Trust `read` runs directly, trust `staged`
   stages an approval proposal per call. Calls reuse a persistent session
@@ -129,8 +132,8 @@ plus dynamic MCP tools per configured server:
 Staged proposals persist in SQLite with expiry and random single use
 tokens. Chat and API decide through one shared `decide` path.
 
-Future tools (REST, calendar and mail writers) plug into the same
-registry and inherit policy plus audit without orchestrator changes.
+Future tools (REST, mail writers) plug into the same registry and
+inherit policy plus audit without orchestrator changes.
 
 ## E. Security and permission layer
 
