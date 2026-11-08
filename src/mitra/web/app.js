@@ -38,6 +38,10 @@ const state = {
   voices: [],
   rate: storedFloat("mitra-rate", 0.98),
   pitch: storedFloat("mitra-pitch", 1.0),
+  persona: stored("mitra-persona") || "auto",
+  personaPresets: {},
+  activeConnector: stored("mitra-connector") || "",
+  autostart: false,
 };
 
 function saveProject() {
@@ -142,10 +146,29 @@ function typeInto(el, text) {
   }, 12);
 }
 
+function personaWants() {
+  const preset = state.personaPresets[state.persona];
+  if (!preset || !preset.voices) {
+    return [];
+  }
+  return preset.voices.map((n) => String(n).toLowerCase());
+}
+
 function voiceScore(v) {
   const name = (v.name || "").toLowerCase();
   const lang = (v.lang || "").toLowerCase();
   let score = 0;
+  const wants = personaWants();
+  const wantPos = wants.indexOf(name);
+  if (wantPos >= 0) {
+    score += 200 - wantPos * 20;
+  }
+  if (state.persona === "jarvis" && (lang === "en-gb" || name.indexOf("daniel") >= 0)) {
+    score += 25;
+  }
+  if (state.persona === "friday" && (lang === "en-ie" || name.indexOf("moira") >= 0)) {
+    score += 25;
+  }
   if (name.indexOf("siri") >= 0) {
     score += 100;
   }
@@ -199,13 +222,65 @@ function loadVoices() {
 }
 
 function shapeForSpeech(text) {
-  return text
+  let out = text
     .replace(/https?:\S+/g, "link")
-    .replace(/[`*_#]/g, "")
+    .replace(/[`*_#>|]/g, "")
     .replace(/\n+/g, ". ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 1500);
+    .trim();
+  out = out.replace(/\bI will\b/g, "I'll").replace(/\bI have\b/g, "I've");
+  out = out.replace(/\bdo not\b/g, "don't").replace(/\bcannot\b/g, "can't");
+  out = out.replace(/\bType 'help' to see examples\./g, "Say help any time for ideas.");
+  out = out.replace(/([.!?])\s+([A-Z])/g, "$1 ... $2");
+  return out.slice(0, 1500);
+}
+
+async function fetchPersonas() {
+  try {
+    const items = await api("/voices");
+    const presets = {};
+    items.forEach((item) => {
+      presets[item.id] = item;
+    });
+    state.personaPresets = presets;
+    const select = $("#persona-select");
+    if (select && presets[state.persona]) {
+      select.value = state.persona;
+    }
+    applyPersona(false);
+  } catch (err) {
+    /* keep local defaults */
+  }
+}
+
+function applyPersona(announce) {
+  const preset = state.personaPresets[state.persona];
+  const caption = $("#persona-line");
+  if (preset && caption) {
+    caption.textContent = preset.line || "Systems nominal.";
+  }
+  if (preset && preset.id !== "auto") {
+    const pace = preset.id === "jarvis" ? 0.94 : 1.02;
+    const tone = preset.pitch || 1.0;
+    state.rate = pace;
+    state.pitch = tone;
+    const rateEl = $("#rate");
+    const pitchEl = $("#pitch");
+    if (rateEl) {
+      rateEl.value = String(pace);
+    }
+    if (pitchEl) {
+      pitchEl.value = String(tone);
+    }
+    store("mitra-rate", String(pace));
+    store("mitra-pitch", String(tone));
+    loadVoices();
+  } else if (preset && caption) {
+    loadVoices();
+  }
+  if (announce && preset) {
+    addMsg("sys", "Persona set to " + preset.label + ".");
+  }
 }
 
 function stopSpeak() {
@@ -509,11 +584,168 @@ async function refreshMemory() {
   }
 }
 
+function starterFor(id) {
+  if (id === "files") {
+    return "list ";
+  }
+  if (id === "web") {
+    return "fetch ";
+  }
+  if (id === "shell") {
+    return "run ";
+  }
+  if (id === "github") {
+    return "github read ";
+  }
+  if (id === "macos") {
+    return "what is on my calendar?";
+  }
+  if (id.indexOf("mcp:") === 0) {
+    return "mcp " + id.slice(4) + " ";
+  }
+  return "";
+}
+
+function connectorCard(card) {
+  const wrap = document.createElement("div");
+  wrap.className = "connector-card" + (card.enabled ? "" : " off");
+  if (state.activeConnector === card.id) {
+    wrap.className += " active";
+  }
+  const head = document.createElement("div");
+  head.className = "chead";
+  const label = document.createElement("span");
+  label.className = "clabel";
+  label.textContent = card.label;
+  const dot = document.createElement("span");
+  dot.className = "cdot";
+  head.appendChild(label);
+  head.appendChild(dot);
+  const hint = document.createElement("div");
+  hint.className = "chint";
+  hint.textContent = card.hint + " " + card.tools.length + " tools.";
+  const btns = document.createElement("div");
+  btns.className = "cbtns";
+  const connectBtn = document.createElement("button");
+  connectBtn.type = "button";
+  connectBtn.textContent = "CONNECT";
+  connectBtn.addEventListener("click", () => {
+    state.activeConnector = card.id;
+    store("mitra-connector", card.id);
+    inputEl.value = starterFor(card.id);
+    inputEl.focus();
+    addMsg("sys", "Connector ready: " + card.label + ". Starter placed below.");
+    refreshConnectors();
+  });
+  const startBtn = document.createElement("button");
+  startBtn.type = "button";
+  startBtn.className = "ok";
+  startBtn.textContent = "START TASK";
+  if (!card.enabled) {
+    startBtn.disabled = true;
+  }
+  startBtn.addEventListener("click", () => {
+    state.activeConnector = card.id;
+    store("mitra-connector", card.id);
+    inputEl.value = starterFor(card.id);
+    send();
+    refreshConnectors();
+  });
+  btns.appendChild(connectBtn);
+  btns.appendChild(startBtn);
+  wrap.appendChild(head);
+  wrap.appendChild(hint);
+  wrap.appendChild(btns);
+  return wrap;
+}
+
+async function refreshConnectors() {
+  try {
+    const items = await api("/connectors?project=" + encodeURIComponent(state.project));
+    const box = $("#connectors");
+    if (!box) {
+      return;
+    }
+    box.textContent = "";
+    items.forEach((card) => {
+      box.appendChild(connectorCard(card));
+    });
+  } catch (err) {
+    /* keep previous list */
+  }
+}
+
+async function refreshBriefing() {
+  try {
+    const data = await api("/briefing?project=" + encodeURIComponent(state.project));
+    const box = $("#briefing");
+    if (!box) {
+      return data;
+    }
+    box.textContent = "";
+    const recap = document.createElement("div");
+    recap.className = "brecap";
+    recap.textContent = data.recap || "No earlier chat yet.";
+    box.appendChild(recap);
+    (data.suggestions || []).slice(0, 4).forEach((tip) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "bsug";
+      btn.textContent = "> " + tip;
+      btn.addEventListener("click", () => {
+        inputEl.value = tip;
+        inputEl.focus();
+      });
+      box.appendChild(btn);
+    });
+    return data;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function refreshAutostart() {
+  try {
+    const data = await api("/autostart");
+    state.autostart = Boolean(data.enabled);
+    paintAutostart();
+  } catch (err) {
+    /* keep previous state */
+  }
+}
+
+function paintAutostart() {
+  const btn = $("#autostart-toggle");
+  if (!btn) {
+    return;
+  }
+  btn.textContent = state.autostart ? "AUTOSTART ON" : "AUTOSTART OFF";
+  btn.classList.toggle("on", state.autostart);
+}
+
+async function loadProfile() {
+  try {
+    const res = await fetch("/profile.json");
+    if (!res.ok) {
+      return;
+    }
+    const data = await res.json();
+    const words = $("#orbit-words");
+    if (words && data.details && data.details.length) {
+      words.textContent = data.details.join(" + ") + " + ";
+    }
+  } catch (err) {
+    /* keep default orbit words */
+  }
+}
+
 function refreshAll() {
   refreshStatus();
   refreshTasks();
   refreshApprovals();
   refreshMemory();
+  refreshConnectors();
+  refreshBriefing();
 }
 
 const canvas = $("#reactor");
@@ -868,11 +1100,37 @@ function setupEvents() {
   $("#voice-select").addEventListener("change", (event) => {
     store("mitra-voice", event.target.value);
   });
+  const personaSelect = $("#persona-select");
+  if (personaSelect) {
+    personaSelect.value = state.persona;
+    personaSelect.addEventListener("change", (event) => {
+      state.persona = event.target.value || "auto";
+      store("mitra-persona", state.persona);
+      applyPersona(true);
+    });
+  }
   $("#voice-test").addEventListener("click", () => {
     stopSpeak();
-    speak("Systems nominal. This is my voice, at your chosen pace and tone.");
+    const preset = state.personaPresets[state.persona];
+    const line = preset && preset.line ? preset.line : "Systems nominal. This is my voice, at your chosen pace and tone.";
+    speak(line);
     blip(660, 880, 130);
   });
+  const autoBtn = $("#autostart-toggle");
+  if (autoBtn) {
+    autoBtn.addEventListener("click", async () => {
+      const want = !state.autostart;
+      addMsg("sys", want ? "Enabling autostart at login." : "Removing autostart.");
+      try {
+        const data = await post("/autostart", { enabled: want });
+        state.autostart = Boolean(data.enabled);
+        paintAutostart();
+        addMsg("sys", data.message || "Autostart updated.");
+      } catch (err) {
+        addMsg("sys", "Autostart change failed: " + err.message);
+      }
+    });
+  }
   window.addEventListener("resize", sizeCanvas);
 }
 
@@ -909,9 +1167,18 @@ function boot() {
   }, 240 * (lines.length + 1));
 }
 
-function greet() {
-  addMitra("Systems nominal. I am Mitra, ready on project " + state.project + ".");
+async function greet() {
   refreshAll();
+  try {
+    const data = await api("/briefing?project=" + encodeURIComponent(state.project));
+    if (data && data.greeting) {
+      addMitra(data.greeting);
+    } else {
+      addMitra("Systems nominal. I am Mitra, ready on project " + state.project + ".");
+    }
+  } catch (err) {
+    addMitra("Systems nominal. I am Mitra, ready on project " + state.project + ".");
+  }
 }
 
 if ("speechSynthesis" in window) {
@@ -921,6 +1188,9 @@ if ("speechSynthesis" in window) {
 sizeCanvas();
 setupEvents();
 setupMic();
+fetchPersonas();
+refreshAutostart();
+loadProfile();
 tickClock();
 window.setInterval(tickClock, 1000);
 window.setInterval(refreshApprovals, 6000);

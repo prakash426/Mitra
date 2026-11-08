@@ -16,6 +16,7 @@ from typing import Any
 VALID_PROVIDERS = ("mock", "ollama", "openai_compat")
 VALID_EMBEDDINGS = ("off", "ollama")
 VALID_SPEECH_BACKENDS = ("silent", "say")
+VALID_SPEECH_PERSONAS = ("auto", "jarvis", "friday")
 VALID_STT_ENGINES = ("stub", "faster_whisper")
 VALID_MCP_TRUST = ("read", "staged")
 PROFILE_KEYS = ("provider", "model", "allowed_dirs", "shell_enabled")
@@ -86,6 +87,7 @@ class SpeechConfig:
     backend: str = "silent"
     voice: str = "Samantha"
     rate: int = 190
+    persona: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -405,6 +407,12 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
         raise ConfigError("speech.rate must be a whole number.")
     if not 50 <= speech_rate <= 500:
         raise ConfigError("speech.rate must sit between 50 and 500.")
+    persona = str(speech_raw.get("persona", "auto")).strip().lower() or "auto"
+    if persona not in VALID_SPEECH_PERSONAS:
+        raise ConfigError(
+            "Unknown speech persona '%s'. Use one of: %s."
+            % (persona, ", ".join(VALID_SPEECH_PERSONAS))
+        )
 
     orch_raw = raw.get("orchestrator", {})
     if not isinstance(orch_raw, dict):
@@ -456,7 +464,9 @@ def load_config(path: str | Path | None = None) -> MitraConfig:
         api=ApiConfig(host=host, port=port),
         approvals=ApprovalsConfig(ttl_seconds=ttl, retain_days=retain),
         shell=_shell_config(raw.get("shell")),
-        speech=SpeechConfig(backend=speech_backend, voice=voice, rate=speech_rate),
+        speech=SpeechConfig(
+            backend=speech_backend, voice=voice, rate=speech_rate, persona=persona
+        ),
         orchestrator=OrchestratorConfig(planning=planning),
         speech_to_text=SpeechToTextConfig(
             engine=stt_engine, model=stt_model.strip(), max_mb=stt_max

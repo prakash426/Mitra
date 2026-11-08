@@ -121,6 +121,23 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_project
                 ON tasks(project, state, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS chat_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_turns_project
+                ON chat_turns(project, id DESC);
+            CREATE TABLE IF NOT EXISTS chat_state (
+                project TEXT PRIMARY KEY,
+                pending_kind TEXT NOT NULL DEFAULT '',
+                pending_target TEXT NOT NULL DEFAULT '',
+                last_topic TEXT NOT NULL DEFAULT '',
+                last_target TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -242,17 +259,38 @@ class MemoryStore:
         except sqlite3.OperationalError:
             rows = []
         if not rows:
-            like = "%" + tokens[0] + "%"
+            clauses = " OR ".join(["lower(text) LIKE ?"] * len(tokens))
+            likes = ["%" + token + "%" for token in tokens]
             rows = self._conn.execute(
                 "SELECT *, substr(text, 1, 160) AS snip FROM memories"
                 " WHERE project = ? AND superseded_by IS NULL"
-                " AND lower(text) LIKE ? ORDER BY updated_at DESC LIMIT ?",
-                (project, like, max(1, limit)),
+                " AND (%s) ORDER BY updated_at DESC LIMIT ?" % clauses,
+                (project, *likes, max(1, limit)),
             ).fetchall()
         hits = []
         for row in rows:
             snippet = row["snip"] or row["text"][:160]
             hits.append(MemoryHit(record=self._row_to_record(row), snippet=snippet))
+        if len(hits) < max(1, limit):
+            seen = {hit.record.id for hit in hits}
+            longest = max(tokens, key=len)
+            if len(longest) >= 4:
+                extra = self._conn.execute(
+                    "SELECT *, substr(text, 1, 160) AS snip FROM memories"
+                    " WHERE project = ? AND superseded_by IS NULL"
+                    " AND lower(text) LIKE ? ORDER BY updated_at DESC LIMIT ?",
+                    (project, "%" + longest + "%", max(1, limit)),
+                ).fetchall()
+                for row in extra:
+                    if row["id"] in seen:
+                        continue
+                    snippet = row["snip"] or row["text"][:160]
+                    hits.append(
+                        MemoryHit(record=self._row_to_record(row), snippet=snippet)
+                    )
+                    seen.add(row["id"])
+                    if len(hits) >= max(1, limit):
+                        break
         return hits
 
     def _row_to_task(self, row: sqlite3.Row) -> Task:
@@ -318,3 +356,112 @@ class MemoryStore:
         )
         self._conn.commit()
         return self.task_get(task_id)
+
+    def turn_add(self, project: str, role: str, text: str) -> int:
+        """Append one chat turn. Keeps the newest 60 per project."""
+        project = project.strip() or "default"
+        role = role.strip() or "user"
+        text = text.strip()
+        if not text:
+            raise ValueError("text must be a non empty string.")
+        cur = self._conn.execute(
+            "INSERT INTO chat_turns (project, role, text, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (project, role, text[:4000], _utcnow()),
+        )
+        self._conn.commit()
+        turn_id = cur.lastrowid or 0
+        self._conn.execute(
+            "DELETE FROM chat_turns WHERE project = ? AND id NOT IN"
+            " (SELECT id FROM chat_turns WHERE project = ?"
+            " ORDER BY id DESC LIMIT 60)",
+            (project, project),
+        )
+        self._conn.commit()
+        return turn_id
+
+    def recent_turns(self, project: str, limit: int = 10) -> list[dict[str, str]]:
+        """Newest conversation turns, oldest first, for prompt context."""
+        rows = self._conn.execute(
+            "SELECT role, text, created_at FROM chat_turns WHERE project = ?"
+            " ORDER BY id DESC LIMIT ?",
+            (project.strip() or "default", max(1, limit)),
+        ).fetchall()
+        turns = [
+            {"role": row["role"], "text": row["text"], "created_at": row["created_at"]}
+            for row in rows
+        ]
+        turns.reverse()
+        return turns
+
+    def last_activity(self, project: str) -> str:
+        """Newest turn timestamp, empty when the project never chatted."""
+        row = self._conn.execute(
+            "SELECT created_at FROM chat_turns WHERE project = ?"
+            " ORDER BY id DESC LIMIT 1",
+            (project.strip() or "default",),
+        ).fetchone()
+        return row["created_at"] if row else ""
+
+    def state_get(self, project: str) -> dict[str, str]:
+        """Pending question plus last topic and target for followups."""
+        row = self._conn.execute(
+            "SELECT pending_kind, pending_target, last_topic, last_target"
+            " FROM chat_state WHERE project = ?",
+            (project.strip() or "default",),
+        ).fetchone()
+        if row is None:
+            return {"pending_kind": "", "pending_target": "", "last_topic": "", "last_target": ""}
+        return {
+            "pending_kind": row["pending_kind"] or "",
+            "pending_target": row["pending_target"] or "",
+            "last_topic": row["last_topic"] or "",
+            "last_target": row["last_target"] or "",
+        }
+
+    def state_set(
+        self,
+        project: str,
+        pending_kind: str | None = None,
+        pending_target: str | None = None,
+        last_topic: str | None = None,
+        last_target: str | None = None,
+    ) -> dict[str, str]:
+        """Upsert conversation state. None fields keep their values."""
+        key = project.strip() or "default"
+        current = self.state_get(key)
+        merged = {
+            "pending_kind": current["pending_kind"] if pending_kind is None else pending_kind,
+            "pending_target": (
+                current["pending_target"] if pending_target is None else pending_target
+            ),
+            "last_topic": current["last_topic"] if last_topic is None else last_topic,
+            "last_target": current["last_target"] if last_target is None else last_target,
+        }
+        self._conn.execute(
+            "INSERT INTO chat_state"
+            " (project, pending_kind, pending_target, last_topic, last_target,"
+            " updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(project) DO UPDATE SET pending_kind = ?,"
+            " pending_target = ?, last_topic = ?, last_target = ?,"
+            " updated_at = ?",
+            (
+                key,
+                merged["pending_kind"],
+                merged["pending_target"],
+                merged["last_topic"],
+                merged["last_target"],
+                _utcnow(),
+                merged["pending_kind"],
+                merged["pending_target"],
+                merged["last_topic"],
+                merged["last_target"],
+                _utcnow(),
+            ),
+        )
+        self._conn.commit()
+        return merged
+
+    def state_clear_pending(self, project: str) -> None:
+        """Drop a pending question after it resolves or a new task starts."""
+        self.state_set(project, pending_kind="", pending_target="")

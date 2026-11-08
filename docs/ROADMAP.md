@@ -83,9 +83,10 @@ Deferred to M7 for want of hardware and toolchain in the build
 environment: compiling and signing the Tauri app, and wake word
 detection. MCP prompts stay future work pending a sampling UI design.
 
-## M7. Release hardening (next, needs the founder's Mac)
+## M7. Release hardening (in progress)
 
-* Compile, sign, and autostart the Tauri desktop app
+* Desktop shell compiles and boots (done this session)
+* Sign, bundle, and autostart the Tauri desktop app
 * Wake word detection on top of server speech to text
 * MCP prompts with user visible sampling approvals
 * First real daily use review across all milestones

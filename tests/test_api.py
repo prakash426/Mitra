@@ -148,3 +148,26 @@ def test_web_hud_served(orch):
     css = client.get("/styles.css")
     assert css.status_code == 200
     assert "reactor-wrap" in css.text
+
+
+def test_briefing_connectors_voices(orch):
+    client = TestClient(build_app(orch))
+    orch.handle_message("P", "Remember that P uses tabs.")
+    orch.handle_message("P", "todo: Ship it.")
+    briefing = client.get("/briefing", params={"project": "P"}).json()
+    assert "tabs" in briefing["recap"] or "Ship" in briefing["recap"]
+    assert briefing["tasks_open"] == 1
+    assert briefing["suggestions"]
+    connectors = client.get("/connectors", params={"project": "P"}).json()
+    ids = {card["id"] for card in connectors}
+    assert {"files", "github", "macos"} <= ids
+    voices = client.get("/voices").json()
+    assert {item["id"] for item in voices} == {"auto", "friday", "jarvis"}
+
+
+def test_autostart_status_endpoint(orch, tmp_path, monkeypatch):
+    monkeypatch.setenv("MITRA_AGENTS_DIR", str(tmp_path))
+    client = TestClient(build_app(orch))
+    body = client.get("/autostart").json()
+    assert body["supported"] is True
+    assert body["enabled"] is False

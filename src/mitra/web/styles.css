@@ -186,13 +186,67 @@ input, button, select {
   min-height: 0;
 }
 #reactor-wrap {
-  height: 190px;
+  height: 252px;
   flex-shrink: 0;
   border: 1px solid #0e3a4d;
   border-radius: 2px;
   background: radial-gradient(circle at 50% 55%, #06222f 0, #030b12 72%);
   position: relative;
   overflow: hidden;
+}
+#avatar-core {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+#orbit-text {
+  position: absolute;
+  width: 228px;
+  height: 228px;
+  animation: orbitspin 46s linear infinite;
+}
+#orbit-text text {
+  fill: #6fd8f2;
+  font-size: 10.5px;
+  letter-spacing: 2.5px;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+#avatar-ring {
+  width: 118px;
+  height: 118px;
+  border-radius: 50%;
+  padding: 3px;
+  background: conic-gradient(from 20deg, #46e6ff, #0a3a4d, #bdf6ff, #46e6ff);
+  box-shadow: 0 0 28px rgba(70, 230, 255, 0.5), inset 0 0 12px rgba(0, 0, 0, 0.6);
+}
+#avatar-img {
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  filter: url(#iron-edge) saturate(1.1) contrast(1.05);
+  background: #04101a;
+}
+#reactor-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  text-align: center;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #7fb3c8;
+  pointer-events: none;
+}
+@keyframes orbitspin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 #reactor {
   width: 100%;
@@ -484,11 +538,96 @@ button.danger:hover {
   background: #155a75;
   border-radius: 4px;
 }
+#connectors {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.connector-card {
+  background: #04101a;
+  border: 1px solid #0e3a4d;
+  border-radius: 2px;
+  padding: 8px 10px;
+}
+.connector-card.active {
+  border-color: #46e6ff;
+  box-shadow: 0 0 14px rgba(70, 230, 255, 0.25);
+}
+.connector-card .chead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.connector-card .clabel {
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: #d9f2ff;
+}
+.connector-card .cdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #57e389;
+  flex-shrink: 0;
+}
+.connector-card.off .cdot {
+  background: #ffb454;
+}
+.connector-card .chint {
+  font-size: 11px;
+  color: #4d7f93;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  margin: 4px 0 8px;
+}
+.connector-card .cbtns {
+  display: flex;
+  gap: 8px;
+}
+.connector-card .cbtns button {
+  flex: 1;
+  padding: 5px 0;
+  font-size: 10px;
+}
+#briefing {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+#briefing .brecap {
+  color: #d9f2ff;
+  line-height: 1.5;
+}
+#briefing .bsug {
+  color: #7fb3c8;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: 0;
+  text-align: left;
+  letter-spacing: normal;
+}
+#briefing .bsug:hover {
+  color: #46e6ff;
+  background: transparent;
+}
+#persona-select {
+  font-size: 11px;
+  color: #7fb3c8;
+  max-width: 110px;
+}
 @media (prefers-reduced-motion: reduce) {
   #boot {
     transition: none;
   }
   #mic.rec {
+    animation: none;
+  }
+  #orbit-text {
     animation: none;
   }
 }

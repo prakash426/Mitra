@@ -14,9 +14,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .autostart import set_enabled as autostart_set
+from .autostart import status as autostart_status
 from .config import ConfigError, MitraConfig, load_config, resolve_profile
 from .orchestrator import Orchestrator, build_orchestrator
 from .providers.base import ProviderError
+from .speech import VOICE_PERSONAS, describe_persona
 from .stt import ALLOWED_SUFFIXES, TranscribeError, build_engine
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -112,6 +115,46 @@ class StatusOut(BaseModel):
     tools: list[str] = []
     shell_enabled: bool = False
     error: str = ""
+
+
+class BriefingOut(BaseModel):
+    greeting: str = ""
+    recap: str = ""
+    last_seen: str = ""
+    tasks_open: int = 0
+    pending_count: int = 0
+    memory_count: int = 0
+    suggestions: list[str] = []
+
+
+class ConnectorOut(BaseModel):
+    id: str
+    label: str
+    tools: list[str] = []
+    enabled: bool = True
+    hint: str = ""
+
+
+class VoiceOut(BaseModel):
+    id: str
+    label: str
+    voices: list[str] = []
+    rate: int = 190
+    pitch: float = 1.0
+    line: str = ""
+
+
+class AutostartOut(BaseModel):
+    supported: bool = True
+    enabled: bool = False
+    server_plist: str = ""
+    opener_plist: str = ""
+    ok: bool = True
+    message: str = ""
+
+
+class AutostartIn(BaseModel):
+    enabled: bool = True
 
 
 def build_app(
@@ -308,6 +351,77 @@ def build_app(
         if ok:
             return {"ok": True, "checked": count_or_id, "bad_id": 0}
         return {"ok": False, "checked": 0, "bad_id": count_or_id}
+
+    @app.get("/briefing", response_model=BriefingOut)
+    def briefing(project: str = "default") -> BriefingOut:
+        active = current_for(project)
+        data = active.briefing(project)
+        return BriefingOut(
+            greeting=str(data.get("greeting", "")),
+            recap=str(data.get("recap", "")),
+            last_seen=str(data.get("last_seen", "")),
+            tasks_open=int(data.get("tasks_open", 0)),  # type: ignore[arg-type]
+            pending_count=int(data.get("pending_count", 0)),  # type: ignore[arg-type]
+            memory_count=int(data.get("memory_count", 0)),  # type: ignore[arg-type]
+            suggestions=[str(item) for item in data.get("suggestions", [])],  # type: ignore[union-attr]
+        )
+
+    @app.get("/connectors", response_model=list[ConnectorOut])
+    def connectors(project: str = "default") -> list[ConnectorOut]:
+        active = current_for(project)
+        return [
+            ConnectorOut(
+                id=str(card.get("id", "")),
+                label=str(card.get("label", "")),
+                tools=[str(name) for name in card.get("tools", [])],  # type: ignore[union-attr]
+                enabled=bool(card.get("enabled", True)),
+                hint=str(card.get("hint", "")),
+            )
+            for card in active.connectors(project)
+        ]
+
+    @app.get("/voices", response_model=list[VoiceOut])
+    def voices() -> list[VoiceOut]:
+        items = [describe_persona("auto")]
+        for key in sorted(VOICE_PERSONAS):
+            items.append(describe_persona(key))
+        out: list[VoiceOut] = []
+        for item in items:
+            out.append(
+                VoiceOut(
+                    id=str(item.get("id", "auto")),
+                    label=str(item.get("label", "")),
+                    voices=[str(v) for v in item.get("voices", [])],  # type: ignore[union-attr]
+                    rate=int(item.get("rate", 190)),  # type: ignore[arg-type]
+                    pitch=float(item.get("pitch", 1.0)),  # type: ignore[arg-type]
+                    line=str(item.get("line", "")),
+                )
+            )
+        return out
+
+    @app.get("/autostart", response_model=AutostartOut)
+    def autostart_get() -> AutostartOut:
+        data = autostart_status()
+        return AutostartOut(
+            supported=bool(data.get("supported", True)),
+            enabled=bool(data.get("enabled", False)),
+            server_plist=str(data.get("server_plist", "")),
+            opener_plist=str(data.get("opener_plist", "")),
+        )
+
+    @app.post("/autostart", response_model=AutostartOut)
+    def autostart_update(body: AutostartIn) -> AutostartOut:
+        data = autostart_set(body.enabled)
+        if not data.get("ok", False):
+            raise HTTPException(status_code=500, detail=str(data.get("message", "")))
+        return AutostartOut(
+            supported=True,
+            enabled=bool(data.get("enabled", body.enabled)),
+            server_plist=str(data.get("server_plist", "")),
+            opener_plist=str(data.get("opener_plist", "")),
+            ok=True,
+            message=str(data.get("message", "")),
+        )
 
     @app.get("/status", response_model=StatusOut)
     def status(project: str = "default") -> StatusOut:

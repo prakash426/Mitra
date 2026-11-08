@@ -52,11 +52,14 @@ max_output_chars = 20000
 
 [speech]
 # One of: silent, say (macOS speech for terminal voice output).
-# voice: any installed macOS voice. Premium and Siri voices sound most
-# natural; download them in System Settings, then restart the terminal.
+# voice: any installed macOS voice, or auto to let the persona choose.
+# persona: auto, jarvis (measured, Daniel first), friday (warm, Moira first).
+# Premium and Siri voices sound most natural; download them in
+# System Settings, then restart the terminal.
 backend = "silent"
 voice = "Samantha"
 rate = 190
+persona = "auto"
 
 [orchestrator]
 # Model driven planning for multi step requests. Needs a reasoning

@@ -129,8 +129,8 @@ purge after the retention window.
   limited to the repos Mitra needs.
 * Calendar and Mail access needs the macOS Automation grant on first run;
   denying it fails those tools closed with guidance.
-* The Tauri desktop scaffold is uncompiled and unaudited until it builds
-  on real hardware with a Rust toolchain.
+* The Tauri desktop app compiles and boots but is unsigned and
+  unbundled; its window loads the localhost API and HUD only.
 * MCP `read` trust runs third party code output directly; grant it only
   to servers you wrote or reviewed.
 * Workflow parameters are plain data substitution, never evaluated.

@@ -5,7 +5,8 @@
   "identifier": "com.mitra.app",
   "build": {
     "devUrl": "http://127.0.0.1:8931",
-    "frontendDist": "../src/mitra/web"
+    "frontendDist": "../../src/mitra/web",
+    "beforeDevCommand": "MITRA_SKIP_OPEN=1 bash ../scripts/macos/mitra-launch.sh"
   },
   "app": {
     "windows": [

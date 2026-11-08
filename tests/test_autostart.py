@@ -19,7 +19,7 @@ def _run(cmd, env=None):
 
 
 def test_scripts_pass_shell_syntax():
-    for name in ("install.sh", "uninstall.sh", "mitra-open.sh"):
+    for name in ("install.sh", "uninstall.sh", "mitra-open.sh", "mitra-launch.sh", "build-app.sh"):
         result = _run(["bash", "-n", str(SCRIPTS / name)])
         assert result.returncode == 0, name
 
@@ -69,3 +69,61 @@ def test_opener_waits_then_opens(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert opened.read_text(encoding="utf-8").strip() == "http://127.0.0.1:9999"
+
+
+def test_launcher_starts_api_then_skips_open(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    fake_python = repo / ".venv" / "bin" / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(fake_python.stat().st_mode | stat.S_IXUSR)
+    (repo / "config.toml").write_text("[api]\nport = 9999\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (bin_dir / "curl").chmod(0o755)
+    env = {
+        "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+        "MITRA_REPO_DIR": str(repo),
+        "MITRA_SKIP_OPEN": "1",
+        "MITRA_HEALTH_TRIES": "1",
+        "HOME": str(tmp_path / "home"),
+    }
+    result = _run(["bash", str(SCRIPTS / "mitra-launch.sh")], env=env)
+    assert result.returncode == 0, result.stderr
+    assert "Mitra ready at http://127.0.0.1:9999" in result.stdout
+
+
+def test_launcher_fails_without_venv(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (bin_dir / "curl").chmod(0o755)
+    env = {
+        "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+        "MITRA_REPO_DIR": str(repo),
+        "MITRA_SKIP_OPEN": "1",
+        "MITRA_HEALTH_TRIES": "1",
+        "HOME": str(tmp_path / "home"),
+    }
+    result = _run(["bash", str(SCRIPTS / "mitra-launch.sh")], env=env)
+    assert result.returncode == 1
+    assert "no venv python" in result.stdout
+
+
+def test_build_app_renders_bundle(tmp_path):
+    out = tmp_path / "dist"
+    result = _run(
+        ["bash", str(SCRIPTS / "build-app.sh"), str(out)],
+        env={"MITRA_REPO_DIR": str(SCRIPTS.parent.parent)},
+    )
+    assert result.returncode == 0, result.stderr
+    app = out / "Mitra.app"
+    assert (app / "Contents" / "Info.plist").is_file()
+    assert (app / "Contents" / "MacOS" / "Mitra").is_file()
+    plist = (app / "Contents" / "Info.plist").read_text(encoding="utf-8")
+    assert "com.mitra.app" in plist
+    launcher = (app / "Contents" / "MacOS" / "Mitra").read_text(encoding="utf-8")
+    assert "mitra-launch.sh" in launcher

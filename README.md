@@ -31,8 +31,15 @@ Run the local API, then open the HUD in your browser:
 python -m mitra.api
 ```
 
-Open http://127.0.0.1:8931 for the JARVIS style interface with voice output,
-approvals, tasks, and memory panels.
+Open http://127.0.0.1:8931 for the JARVIS style interface with your
+portrait in the reactor, connectors on the left rail, briefing and
+greeting on launch, plus voice output, approvals, tasks, and memory panels.
+
+One command does both steps (API plus app):
+
+```sh
+bash scripts/macos/mitra-launch.sh
+```
 
 Run the tests:
 
@@ -87,13 +94,18 @@ cited evidence.
 The HUD speaks every reply. It automatically prefers natural neural
 voices (Siri, Premium, Enhanced) when your system has them. For the best
 voice, download one in System Settings under Accessibility, Spoken
-Content, System Voice, Manage Voices, then restart the browser. Pace and
-tone sliders plus a TEST button sit under the reactor; your choices persist.
+Content, System Voice, Manage Voices, then restart the browser. A
+persona picker under the reactor offers JARVIS (measured, prefers
+Daniel) and FRIDAY (warm, prefers Moira), each with its own pace and
+greeting line. Pace and tone sliders plus a TEST button sit beside it;
+your choices persist. Replies are shaped for speech with contractions
+and breath pauses, so they sound like a person, not a reader.
 
 In the terminal, `python -m mitra.cli -p Demo -v` speaks replies through
-macOS speech. Set `backend = "say"`, pick a `voice`, and tune `rate` in
-the `[speech]` config section. Sending a message interrupts speech, so
-you can always cut Mitra off.
+macOS speech. Set `backend = "say"`, pick a `voice` (or `auto` to let
+the persona choose), set `persona = "jarvis"` or `"friday"`, and tune
+`rate` in the `[speech]` config section. Sending a message interrupts
+speech, so you can always cut Mitra off.
 
 ## Start Mitra with your Mac
 
@@ -107,13 +119,23 @@ bash scripts/macos/install.sh
 ```
 
 To remove it later: `bash scripts/macos/uninstall.sh`. Server logs live
-at `~/Library/Logs/mitra/server.log`.
+at `~/Library/Logs/mitra/server.log`. The HUD header also carries an
+AUTOSTART pill that toggles the same login items without the terminal.
+
+Prefer a clickable app instead: `bash scripts/macos/build-app.sh` builds
+`dist/Mitra.app`, which you can keep in `/Applications` and add under
+Login Items. It runs the same launcher, so Mitra greets you with a
+recap of your last session, open tasks, pending approvals, and a
+suggestion for what to do first.
 
 ## What Mitra does
 
 * Remember and recall project scoped facts with sources and timestamps.
+* Save several facts from one message; recall groups the whole topic.
+* Keep short term chat context, so followups resolve without repeats.
 * Correct earlier facts; the latest explicit correction wins.
 * Keep standing instructions that surface in every chat.
+* Greet each launch with a recap plus suggestions for what is next.
 * Track tasks with open, doing, and done states.
 * Read files inside allowed directories and summarize them.
 * List directories, search file names, and fetch pages as text.
@@ -133,6 +155,9 @@ at `~/Library/Logs/mitra/server.log`.
 * Talk hands busy: click the mic, or hold Space outside the input.
 * Resolve per project profiles for provider, scope, and shell settings.
 * Speak replies aloud in the HUD and in the terminal with -v.
+* Offer JARVIS and FRIDAY voice personas with human pacing.
+* Show every connector on the left rail with connect and start task.
+* Toggle autostart from the HUD header or install a Login Item app.
 * Log every proposal, decision, and execution.
 * Fail gracefully when config or models are missing.
 
@@ -174,10 +199,10 @@ Mitra/
     tools/  base  registry  file_tools  safe_tools  shell_tool
       github_tools  macos_tools  mcp_tools
     security/  policy  audit
-    planning  mcp  stt
-    web/  HUD served at the root URL
-  scripts/macos/  login install plus uninstall
-  desktop/  Tauri shell scaffold
+    planning  mcp  stt  autostart
+    web/  HUD plus avatar and profile served at the root URL
+  scripts/macos/  login install, launcher, app builder, opener
+  desktop/  Tauri shell with dev hook that boots the API
   tests/
 ```
 
@@ -193,10 +218,12 @@ Mitra/
 
 Milestone six is done: everything in five plus saved parameterized
 workflows, persistent MCP sessions with resource reads, and HUD
-push to talk. Still waiting on real hardware: compiling and signing
-the Tauri app, and wake word detection. Real transcription needs the
-optional faster-whisper install. The shell tool stays disabled unless
-you enable it with a narrow allowlist. See [Roadmap](docs/ROADMAP.md)
+push to talk. Milestone seven is nearly done: the desktop shell compiles
+and boots, one command launches API plus app, and an unsigned Mitra.app
+plus HUD autostart toggle cover login starts. Still ahead: signing and
+notarization, wake word detection, and MCP prompts. Real transcription
+needs the optional faster-whisper install. The shell tool stays disabled
+unless you enable it with a narrow allowlist. See [Roadmap](docs/ROADMAP.md)
 for what is next and [Security](docs/SECURITY.md) for known gaps.
 
 Vector recall stays off until you opt in: set `embeddings = "ollama"`

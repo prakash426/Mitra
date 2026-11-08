@@ -132,6 +132,69 @@ def _kind_for_fact(text: str) -> str:
     return "fact"
 
 
+def _split_facts(arg: str) -> list[str]:
+    """Split one remember request into separate facts on the same topic.
+
+    Explicit delimiters win: repeated remember markers, newlines, bullets,
+    semicolons, and pipes each start a new fact. As a fallback, two long
+    sentences joined by a period also split, so two pieces of info about
+    one topic never collapse into a single record.
+    """
+    text = arg.strip()
+    if not text:
+        return []
+    parts = re.split(r"(?is)\bremember that\b\s*", text)
+    parts = [part.strip().strip("\"'") for part in parts if part.strip()]
+    if len(parts) >= 2:
+        return [part for part in parts if len(part) >= 2][:8]
+    chunks: list[str] = []
+    for line in re.split(r"[\n;|]+", text):
+        cleaned = line.strip().lstrip("-*").strip()
+        if cleaned:
+            chunks.append(cleaned)
+    if len(chunks) >= 2:
+        return chunks[:8]
+    sentences = [
+        part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()
+    ]
+    if len(sentences) >= 2 and all(len(part) >= 15 for part in sentences[:4]):
+        return sentences[:4]
+    return [text]
+
+
+_PRONOUNS = frozenset(
+    "it that this them those same other another else more second next".split()
+)
+
+
+def _resolve_followup(
+    state: dict[str, str], message: str, intent: _Intent
+) -> _Intent:
+    """Rewrite short followups with pending questions and last topic."""
+    pending_kind = state.get("pending_kind", "")
+    pending_target = state.get("pending_target", "")
+    last_topic = state.get("last_topic", "")
+    last_target = state.get("last_target", "")
+    text = message.strip()
+    lowered = text.lower()
+    if pending_kind and intent.kind == "chat" and text:
+        words = lowered.split()
+        looks_like_question = text.endswith("?") and len(words) > 6
+        if pending_kind == "read_file" and not looks_like_question and len(text) <= 300:
+            return _Intent(kind="read_file", arg="read " + text)
+        if pending_kind == "stage_write_content" and pending_target and len(text) >= 1:
+            if len(text) <= 4000 and not looks_like_question:
+                return _Intent(kind="stage_write", arg=pending_target, arg2=text)
+    if intent.kind in ("chat", "recall") and last_topic:
+        words = set(re.findall(r"[a-z0-9]+", lowered))
+        if words & _PRONOUNS and len(text.split()) <= 16:
+            expanded = ("%s %s" % (text, last_topic)).strip()
+            return _Intent(kind=intent.kind, arg=expanded)
+        if intent.kind == "recall" and last_target and "file" in lowered:
+            return _Intent(kind="recall", arg=("%s %s" % (text, last_target)).strip())
+    return intent
+
+
 MAX_IMPORT_RECORDS = 200
 
 
@@ -445,6 +508,11 @@ class Orchestrator:
         if not message:
             return OrchestratorResponse(text="Say something and I will help.")
         intent = _parse(message)
+        try:
+            state = self.memory.state_get(project)
+        except Exception:
+            state = {"pending_kind": "", "pending_target": "", "last_topic": "", "last_target": ""}
+        intent = _resolve_followup(state, message, intent)
         ctx = ToolContext(
             project=project,
             policy=self.policy,
@@ -463,7 +531,9 @@ class Orchestrator:
             and self.provider.can_reason
             and looks_like_plan(message)
         ):
-            return self._plan_message(ctx, message)
+            response = self._plan_message(ctx, message)
+            self._remember_turn(project, message, response.text, intent, response)
+            return response
         handler = {
             "remember": self._remember,
             "correction": self._correction,
@@ -506,22 +576,81 @@ class Orchestrator:
         }.get(intent.kind, self._chat)
         draft, actions, approval, evidence = handler(ctx, intent)
         text = self._render(ctx, intent, message, draft, evidence)
-        return OrchestratorResponse(
+        response = OrchestratorResponse(
             text=text, actions=actions, approval_request=approval, evidence=evidence
         )
+        self._remember_turn(project, message, text, intent, response)
+        return response
 
-    def _open_prompt(self, message: str, evidence: list[EvidenceItem]) -> str:
+    def _recent_lines(self, project: str, limit: int = 6) -> list[str]:
+        try:
+            turns = self.memory.recent_turns(project, limit=limit)
+        except Exception:
+            return []
+        lines = []
+        for turn in turns[-limit:]:
+            who = "User" if turn["role"] == "user" else "Mitra"
+            snippet = turn["text"].replace("\n", " ").strip()[:280]
+            if snippet:
+                lines.append("%s: %s" % (who, snippet))
+        return lines
+
+    def _remember_turn(
+        self,
+        project: str,
+        message: str,
+        reply: str,
+        intent: _Intent,
+        response: OrchestratorResponse,
+    ) -> None:
+        try:
+            self.memory.turn_add(project, "user", message)
+            self.memory.turn_add(project, "mitra", reply)
+        except Exception:
+            return
+        try:
+            topic = _topic_hint(message + " " + (response.evidence[0].text if response.evidence else ""))
+            updates: dict[str, str | None] = {}
+            if topic:
+                updates["last_topic"] = topic
+            target = ""
+            if intent.kind == "read_file":
+                target = self._read_target(intent.arg) or intent.arg[:120]
+            elif intent.kind in ("stage_write", "update_needs_content"):
+                target = intent.arg[:160]
+            elif response.approval_request is not None:
+                target = response.approval_request.target[:160]
+            if target:
+                updates["last_target"] = target
+            if intent.kind == "update_needs_content":
+                updates["pending_kind"] = "stage_write_content"
+                updates["pending_target"] = intent.arg[:160]
+            elif intent.kind == "read_file" and response.actions == []:
+                updates["pending_kind"] = "read_file"
+                updates["pending_target"] = ""
+            elif intent.kind not in ("chat", "recall"):
+                self.memory.state_clear_pending(project)
+            elif response.approval_request is not None:
+                self.memory.state_clear_pending(project)
+            if updates:
+                self.memory.state_set(project, **updates)  # type: ignore[arg-type]
+        except Exception:
+            return
+
+    def _open_prompt(self, message: str, evidence: list[EvidenceItem], project: str = "") -> str:
         lines = [
             "- %s (source: %s, updated %s)" % (e.text, e.source, e.updated)
             for e in evidence
         ]
-        return (
+        history = self._recent_lines(project) if project else []
+        prompt = (
             OPEN_CHAT_INSTRUCTIONS
             + "\n\nMEMORY CONTEXT:\n"
             + ("\n".join(lines) if lines else "(none stored)")
-            + "\n\nUSER:\n"
-            + message
         )
+        if history:
+            prompt += "\n\nRECENT CONVERSATION:\n" + "\n".join(history)
+        return prompt + "\n\nUSER:\n" + message
 
     def _render(
         self,
@@ -532,14 +661,18 @@ class Orchestrator:
         evidence: list[EvidenceItem],
     ) -> str:
         open_answer = intent.kind == "chat" and self.provider.can_reason
+        history = self._recent_lines(ctx.project)
         if open_answer:
-            prompt: str = self._open_prompt(message, evidence)
+            prompt: str = self._open_prompt(message, evidence, ctx.project)
             context = ""
         else:
             context_lines = [
                 "- %s (source: %s, updated %s)" % (e.text, e.source, e.updated)
                 for e in evidence
             ]
+            if history:
+                context_lines.append("Recent conversation:")
+                context_lines.extend("- " + line for line in history[-4:])
             prompt = RENDER_INSTRUCTIONS + draft
             context = "\n".join(context_lines)
         try:
@@ -579,23 +712,42 @@ class Orchestrator:
     def _remember(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
-        kind = _kind_for_fact(intent.arg)
-        try:
-            record = self.memory.add(ctx.project, kind, intent.arg, source="user")
-        except ValueError as exc:
-            return "I could not save that: %s" % exc, [], None, []
-        self.audit.log(
-            actor="user",
-            project=ctx.project,
-            action="memory_add",
-            target="memory:%d" % record.id,
-            decision="allowed",
-            rationale="Explicit remember request.",
-            result=record.text[:120],
-        )
-        self._embed_best_effort(record)
-        draft = "Noted for %s. Saved as %s:\n%s" % (ctx.project, kind, record.text)
-        return draft, ["memory_add:%d" % record.id], None, _evidence_from_records([record])
+        facts = _split_facts(intent.arg)
+        if not facts:
+            return "I could not save that: empty text.", [], None, []
+        records: list[MemoryRecord] = []
+        actions: list[str] = []
+        for fact in facts:
+            kind = _kind_for_fact(fact)
+            try:
+                record = self.memory.add(ctx.project, kind, fact, source="user")
+            except ValueError as exc:
+                if not records:
+                    return "I could not save that: %s" % exc, [], None, []
+                continue
+            self.audit.log(
+                actor="user",
+                project=ctx.project,
+                action="memory_add",
+                target="memory:%d" % record.id,
+                decision="allowed",
+                rationale="Explicit remember request.",
+                result=record.text[:120],
+            )
+            self._embed_best_effort(record)
+            records.append(record)
+            actions.append("memory_add:%d" % record.id)
+        if len(records) >= 2:
+            lines = "\n".join("%d. %s" % (pos, r.text) for pos, r in enumerate(records, 1))
+            draft = "Noted for %s. Saved %d facts:\n%s" % (ctx.project, len(records), lines)
+        else:
+            record = records[0]
+            draft = "Noted for %s. Saved as %s:\n%s" % (
+                ctx.project,
+                record.kind,
+                record.text,
+            )
+        return draft, actions, None, _evidence_from_records(records)
 
     def _correction(
         self, ctx: ToolContext, intent: _Intent
@@ -624,7 +776,7 @@ class Orchestrator:
     def _recall(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
-        hits = self._hybrid(ctx.project, intent.arg, limit=5)
+        hits = self._hybrid(ctx.project, intent.arg, limit=8)
         if not hits:
             return (
                 "I have nothing saved about that for %s yet." % ctx.project,
@@ -2043,7 +2195,7 @@ class Orchestrator:
     def _chat(
         self, ctx: ToolContext, intent: _Intent
     ) -> tuple[str, list[str], ApprovalRequest | None, list[EvidenceItem]]:
-        hits = self._hybrid(ctx.project, intent.arg, limit=3)
+        hits = self._hybrid(ctx.project, intent.arg, limit=6)
         standing = self._standing(ctx.project)
         prefix = ""
         if standing:
@@ -2064,6 +2216,122 @@ class Orchestrator:
             "examples." % ctx.project
         )
         return draft, ["chat:help"], None, evidence
+
+    def briefing(self, project: str) -> dict[str, object]:
+        """Launch greeting: last session recap plus proactive suggestions."""
+        key = project.strip() or "default"
+        try:
+            turns = self.memory.recent_turns(key, limit=8)
+        except Exception:
+            turns = []
+        try:
+            last_seen = self.memory.last_activity(key)
+        except Exception:
+            last_seen = ""
+        try:
+            open_tasks = self.memory.task_list(key, state="open")
+            doing_tasks = self.memory.task_list(key, state="doing")
+        except Exception:
+            open_tasks = []
+            doing_tasks = []
+        try:
+            pending = self.gate.pending(key)
+        except Exception:
+            pending = []
+        try:
+            records = self.memory.list_project(key, limit=6)
+            standing = [r for r in self.memory.list_project(key, limit=50) if r.kind == "standing"]
+        except Exception:
+            records = []
+            standing = []
+        user_lines = [t["text"] for t in turns if t["role"] == "user"]
+        recap = ""
+        if user_lines:
+            last_user = user_lines[-1].replace("\n", " ").strip()[:220]
+            recap = "Last time you asked about: %s." % last_user
+            if len(user_lines) >= 2:
+                prev = user_lines[-2].replace("\n", " ").strip()[:140]
+                recap += " Before that: %s." % prev
+        else:
+            recap = "No earlier chat in %s yet. Tell me what matters here." % key
+        suggestions: list[str] = []
+        if pending:
+            suggestions.append(
+                "%d approval%s waiting. Say pending to review." % (len(pending), "" if len(pending) == 1 else "s")
+            )
+        unfinished = list(doing_tasks) + list(open_tasks)
+        if unfinished:
+            suggestions.append(
+                "Continue %s: %s." % ("task %d" % unfinished[0].id, unfinished[0].title[:90])
+            )
+        if standing:
+            suggestions.append("Standing rule active: %s." % standing[0].text[:110])
+        topics = [_topic_hint(r.text) for r in records[:3]]
+        topics = [t for t in topics if t]
+        if topics:
+            suggestions.append("Open threads: %s." % ", ".join(list(dict.fromkeys(topics))[:3]))
+        if not suggestions:
+            suggestions.append("Ask me to remember a fact, read a file, or plan a task.")
+        hour = datetime.now().hour
+        daypart = "morning" if hour < 12 else "afternoon" if hour < 18 else "evening"
+        greeting = "Good %s. %s %s" % (daypart, recap, suggestions[0])
+        return {
+            "greeting": greeting,
+            "recap": recap,
+            "last_seen": last_seen,
+            "tasks_open": len(open_tasks) + len(doing_tasks),
+            "pending_count": len(pending),
+            "memory_count": len(records),
+            "suggestions": suggestions,
+        }
+
+    def connectors(self, project: str) -> list[dict[str, object]]:
+        """Connector cards for the left rail: tools grouped by capability."""
+        groups: dict[str, list[str]] = {
+            "files": ["read_file", "propose_write_file", "list_dir", "search_files"],
+            "web": ["fetch_url"],
+            "shell": ["run_shell"],
+            "github": ["github_read_file", "github_list_prs", "github_open_pr"],
+            "macos": ["calendar_next", "mail_recent"],
+        }
+        labels = {
+            "files": "Files in scope",
+            "web": "Web fetch",
+            "shell": "Shell (approval only)",
+            "github": "GitHub",
+            "macos": "macOS calendar and mail",
+        }
+        available = {spec.name for spec in self.registry.describe()}
+        cards: list[dict[str, object]] = []
+        for group, names in groups.items():
+            present = [name for name in names if name in available]
+            if not present:
+                continue
+            enabled = True
+            hint = "Ready."
+            if group == "shell":
+                enabled = bool(self.policy.shell and self.policy.shell.enabled)
+                hint = "Allowlisted commands only." if enabled else "Disabled in config."
+            cards.append(
+                {
+                    "id": group,
+                    "label": labels[group],
+                    "tools": present,
+                    "enabled": enabled,
+                    "hint": hint,
+                }
+            )
+        for server in sorted(self.config.mcp_servers):
+            cards.append(
+                {
+                    "id": "mcp:" + server,
+                    "label": "MCP server " + server,
+                    "tools": [s.name for s in self.registry.describe() if s.name.startswith("mcp__" + server + "__")],
+                    "enabled": True,
+                    "hint": "Trust: %s." % self.config.mcp_servers[server].trust,
+                }
+            )
+        return cards
 
 
 def build_orchestrator(

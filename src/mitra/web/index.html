@@ -7,6 +7,18 @@
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+<svg width="0" height="0" aria-hidden="true">
+<defs>
+<filter id="iron-sketch">
+<feColorMatrix type="matrix" values="0.2 0.5 0.5 0 0  0.25 0.7 0.6 0 0.08  0.35 0.75 0.8 0 0.12  0 0 0 1 0"></feColorMatrix>
+</filter>
+<filter id="iron-edge" x="-20%" y="-20%" width="140%" height="140%">
+<feGaussianBlur stdDeviation="1.1" result="soft"></feGaussianBlur>
+<feComposite in="SourceGraphic" in2="soft" operator="arithmetic" k1="1.4" k2="-1.1" k3="0.25" k4="0"></feComposite>
+<feColorMatrix type="matrix" values="0.25 0.55 0.55 0 0.02  0.3 0.8 0.7 0 0.1  0.4 0.85 0.9 0 0.14  0 0 0 1 0"></feColorMatrix>
+</filter>
+</defs>
+</svg>
 <div id="boot">
   <div class="boot-box">
     <div class="boot-title">MITRA</div>
@@ -23,10 +35,15 @@
   <div class="toggles">
     <button id="voice-toggle" class="pill on" type="button">VOICE ON</button>
     <button id="sound-toggle" class="pill on" type="button">SOUND ON</button>
+    <button id="autostart-toggle" class="pill" type="button">AUTOSTART OFF</button>
   </div>
 </header>
 <main id="grid">
   <aside id="left">
+    <section class="panel">
+      <h2>CONNECTORS</h2>
+      <div id="connectors"></div>
+    </section>
     <section class="panel">
       <h2>SYSTEM</h2>
       <dl id="system-list"></dl>
@@ -41,8 +58,28 @@
     </section>
   </aside>
   <section id="center">
-    <div id="reactor-wrap"><canvas id="reactor"></canvas></div>
+    <div id="reactor-wrap">
+      <canvas id="reactor"></canvas>
+      <div id="avatar-core">
+        <svg id="orbit-text" viewBox="0 0 200 200" aria-hidden="true">
+          <defs>
+            <path id="orbit-path" d="M 100,100 m -78,0 a 78,78 0 1,1 156,0 a 78,78 0 1,1 -156,0"></path>
+          </defs>
+          <text><textPath href="#orbit-path" id="orbit-words">JAYA PRAKASH MEREPALA + DALLAS TEXAS + PALNI INC + SALESFORCE CONSULTANT + </textPath></text>
+        </svg>
+        <div id="avatar-ring">
+          <img id="avatar-img" src="/avatar.jpg" alt="Operator portrait in Iron Man outline style">
+        </div>
+      </div>
+      <div id="reactor-caption"><span id="persona-line">Systems nominal.</span></div>
+    </div>
     <div id="voicebar">
+      <label for="persona-select">PERSONA</label>
+      <select id="persona-select" title="Voice persona">
+        <option value="auto">AUTO</option>
+        <option value="jarvis">JARVIS</option>
+        <option value="friday">FRIDAY</option>
+      </select>
       <label for="voice-select">VOICE</label>
       <select id="voice-select" title="Voice"></select>
       <label for="rate">PACE</label>
@@ -59,6 +96,10 @@
     </div>
   </section>
   <aside id="right">
+    <section class="panel">
+      <h2>BRIEFING</h2>
+      <div id="briefing"></div>
+    </section>
     <section class="panel grow">
       <h2>APPROVALS</h2>
       <div id="approvals"></div>
